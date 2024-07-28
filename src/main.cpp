@@ -13,8 +13,8 @@ public:
   void setPosition(float x, float y);
   Node *getParent();
   static void updatePosition();
+  static void updateVelocity();
 
-private:
   struct Position {
     float x, y;
   };
@@ -39,6 +39,16 @@ private:
 void Node::setPosition(float x, float y) {
   position()->x = x;
   position()->y = y;
+}
+
+void Node::updateVelocity() {
+  auto *buffer =
+      fd::ComponentManager<Node>::inst().getOrCreateComponentBuffer<Velocity>();
+  for (auto it = buffer->begin(); it != buffer->end(); ++it) {
+    it->dx += 1;
+    it->dy += 1;
+    printf("dx: %f, dy: %f\n", it->dx, it->dy);
+  }
 }
 
 void Node::updatePosition() {
@@ -75,5 +85,31 @@ TEST_CASE("ECS") {
   Sprite *e = Sprite::create();
   e->setPosition(9, 10);
 
+  Node::updateVelocity();
+
+  REQUIRE(a->velocity()->dx == 2);
+  REQUIRE(a->velocity()->dy == 2);
+  REQUIRE(b->velocity()->dx == 2);
+  REQUIRE(b->velocity()->dy == 2);
+  REQUIRE(c->velocity()->dx == 2);
+  REQUIRE(c->velocity()->dy == 2);
+  REQUIRE(d->velocity()->dx == 2);
+  REQUIRE(d->velocity()->dy == 2);
+  REQUIRE(e->velocity()->dx == 2);
+  REQUIRE(e->velocity()->dy == 2);
+
+
   Node::updatePosition();
+
+  REQUIRE(a->position()->x == 2);
+  REQUIRE(a->position()->y == 3);
+  REQUIRE(b->position()->x == 4);
+  REQUIRE(b->position()->y == 5);
+  REQUIRE(c->position()->x == 6);
+  REQUIRE(c->position()->y == 7);
+  REQUIRE(d->position()->x == 8);
+  REQUIRE(d->position()->y == 9);
+  REQUIRE(e->position()->x == 10);
+  REQUIRE(e->position()->y == 11);
+
 }

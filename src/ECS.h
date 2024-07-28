@@ -129,7 +129,7 @@ public:
 
   uint32_t add() override {
     uint32_t id = container.size();
-    printf("Size = %llu\n", sizeof(T));
+    printf("Size = %lu\n", sizeof(T));
     container.push_back(T{});
     return id;
   }
@@ -216,9 +216,33 @@ template <typename T> class BufferIterator {
 public:
   using CBType = ComponentBuffer<std::remove_const_t<T>>;
   BufferIterator() {}
-  BufferIterator(CBType *cb) : cb(cb) {}
+  BufferIterator(CBType *_cb) {
+    if (_cb != nullptr) {
+      this->cb = _cb;
+    }
+
+    it = cb->container.begin();
+
+    while (cb != nullptr && !IsValid())
+      MoveNext();
+  }
   BufferIterator &operator++() {
     it++;
+
+    while (cb != nullptr && !IsValid())
+      MoveNext();
+    return *this;
+  }
+
+  bool IsValid() {
+    if (cb == nullptr)
+      return false;
+    if (it == cb->container.end())
+      return false;
+    return true;
+  }
+
+  void MoveNext() {
     if (it == cb->container.end()) {
       if (cb->children != nullptr) {
         cb = dynamic_cast<CBType*>(cb->children);
@@ -238,8 +262,6 @@ public:
         }
       }
     }
-
-    return *this;
   }
 
   bool operator==(const BufferIterator &other) {
@@ -253,13 +275,13 @@ public:
       }
     }
   }
-  bool operator!=(const BufferIterator &other) { return !(it == other.it); }
+  bool operator!=(const BufferIterator &other) { return !(*this == other); }
 
-  T *operator->() { return it.get(); }
+  T *operator->() { return &*it; }
   T &operator*() { return *it; }
 
 private:
-  CBType *cb;
+  CBType *cb = nullptr;
   std::deque<T>::iterator it;
 };
 
@@ -267,12 +289,16 @@ template <typename B, typename... Ts>
 class ViewIterator : public BufferIterator<B>, public BufferIterator<Ts>... {
 public:
   ViewIterator() {}
+  ViewIterator(IComponentManager& cm) {
+    
+  }
+
   ViewIterator &operator++() {
     BufferIterator<B>::operator++();
     (BufferIterator<Ts>::operator++(),...);
     return *this;
   }
-
+  bool operator==(const ViewIterator &other) { return false; }
   bool operator!=(const ViewIterator &other) { return false; }
 
   std::tuple<Ts *...> operator*() { return std::tuple<Ts *...>(); }
