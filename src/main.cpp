@@ -1,14 +1,10 @@
 #include "ECS.h"
+#include <cstdint>
 #include <list>
 
 class Node : public fd::Entity {
 public:
-  static Node *create() {
-    fd::Component<Node, Position>::add();
-    fd::Component<Node, Velocity>::add();
-    fd::Component<Node, Tree>::add();
-    return fd::CreateEntity<Node>();
-  }
+  ENTITY(Node, fd::Entity)
 
   void release() override {
     // fd::ReleaseEntity<Node>(id);
@@ -24,8 +20,8 @@ private:
   };
 
   struct Velocity {
-    float dx;
-    float dy;
+    float dx = 1;
+    float dy = 1;
   };
 
   struct Tree {
@@ -33,30 +29,51 @@ private:
     std::list<Node *> children;
   };
 
-  fd::Component<Node, Position> position;
-  fd::Component<Node, Velocity> velocity;
-  fd::Component<Node, Tree> tree;
+  COMPONENT(Position, position)
+  COMPONENT(Velocity, velocity)
+  COMPONENT(Tree, tree)
+
+  float a, b, c;
 };
 
 void Node::setPosition(float x, float y) {
-  position->x = x;
-  position->y = y;
+  position()->x = x;
+  position()->y = y;
 }
 
 void Node::updatePosition() {
-  auto view = fd::View<Node, Position, const Velocity>();
+  auto view = fd::View<Node, Position, Velocity>();
   for (auto [pos, v] : view) {
     pos->x += v->dx;
     pos->y += v->dy;
   }
 }
 
-Node *Node::getParent() { return tree->parent; }
+Node *Node::getParent() { return tree()->parent; }
 
-int main() {
+struct Image {
+  int width, height;
+  uint32_t *pixels;
+};
+
+class Sprite : public Node {
+public:
+  ENTITY(Sprite, Node)
+
+  COMPONENT(Image, image);
+};
+
+TEST_CASE("ECS") {
   Node *a = Node::create();
   a->setPosition(1, 2);
-  a->release();
+  Node *b = Node::create();
+  b->setPosition(3, 4);
+  Sprite *c = Sprite::create();
+  c->setPosition(5, 6);
+  Sprite *d = Sprite::create();
+  d->setPosition(7, 8);
+  Sprite *e = Sprite::create();
+  e->setPosition(9, 10);
 
-  return 0;
+  Node::updatePosition();
 }
