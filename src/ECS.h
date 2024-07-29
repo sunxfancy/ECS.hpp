@@ -245,17 +245,17 @@ public:
   void MoveNext() {
     if (it == cb->container.end()) {
       if (cb->children != nullptr) {
-        cb = dynamic_cast<CBType*>(cb->children);
+        cb = dynamic_cast<CBType *>(cb->children);
         it = cb->container.begin();
       } else if (cb->next != nullptr) {
-        cb = dynamic_cast<CBType*>(cb->next);
+        cb = dynamic_cast<CBType *>(cb->next);
         it = cb->container.begin();
       } else {
         while (cb->parent != nullptr && cb->parent->next == nullptr) {
-          cb = dynamic_cast<CBType*>(cb->parent);
+          cb = dynamic_cast<CBType *>(cb->parent);
         }
         if (cb->parent != nullptr) {
-          cb = dynamic_cast<CBType*>(cb->parent->next);
+          cb = dynamic_cast<CBType *>(cb->parent->next);
           it = cb->container.begin();
         } else {
           cb = nullptr;
@@ -288,20 +288,28 @@ private:
 template <typename B, typename... Ts>
 class ViewIterator : public BufferIterator<B>, public BufferIterator<Ts>... {
 public:
-  ViewIterator() {}
-  ViewIterator(IComponentManager& cm) {
-    
+  ViewIterator() {
+    auto &cm = ComponentManager<B>::inst();
+    IComponentBuffer *cbs[] = {
+        cm.template getOrCreateComponentBuffer<std::remove_const_t<Ts>>()...};
+    ComponentBuffer<B>* buffer = dynamic_cast<ComponentBuffer<B>*>(cm.registy);
+
+    for (auto cb : cbs) {
+      if (cb != nullptr) {
+        cb->ensure_space(buffer->container.size());
+      }
+    }
   }
 
   ViewIterator &operator++() {
     BufferIterator<B>::operator++();
-    (BufferIterator<Ts>::operator++(),...);
+    (BufferIterator<Ts>::operator++(), ...);
     return *this;
   }
   bool operator==(const ViewIterator &other) { return false; }
   bool operator!=(const ViewIterator &other) { return false; }
 
-  std::tuple<Ts *...> operator*() { return std::tuple<Ts *...>(); }
+  std::tuple<Ts *...> operator*() { return std::tuple<Ts*...>(BufferIterator<Ts>::operator->()...); }
 };
 
 template <typename B, typename... Ts> class View {

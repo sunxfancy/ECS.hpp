@@ -42,12 +42,10 @@ void Node::setPosition(float x, float y) {
 }
 
 void Node::updateVelocity() {
-  auto *buffer =
-      fd::ComponentManager<Node>::inst().getOrCreateComponentBuffer<Velocity>();
-  for (auto it = buffer->begin(); it != buffer->end(); ++it) {
-    it->dx += 1;
-    it->dy += 1;
-    printf("dx: %f, dy: %f\n", it->dx, it->dy);
+  auto view = fd::View<Node, Velocity>();
+  for (auto [v] : view) {
+    v->dx += 1;
+    v->dy += 1;
   }
 }
 
