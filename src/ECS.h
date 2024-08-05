@@ -1,5 +1,5 @@
 #pragma once
-
+#define ZEROERR_DISABLE_MAIN
 #define ZEROERR_IMPLEMENTATION
 #include "zeroerr.hpp"
 
@@ -137,6 +137,7 @@ public:
   void ensure_space(uint32_t id) override {
     if (id >= container.size()) {
       container.resize(id + 1);
+      dbg(container);
     }
   }
 
@@ -288,11 +289,40 @@ private:
 template <typename B, typename... Ts>
 class ViewIterator : public BufferIterator<B>, public BufferIterator<Ts>... {
 public:
-  ViewIterator() {
+  ViewIterator() {}
+
+  ViewIterator(ComponentManager<B> &cm)
+      : BufferIterator<B>(dynamic_cast<ComponentBuffer<B> *>(cm.registy)),
+        BufferIterator<Ts>(cm.template getOrCreateComponentBuffer<
+                           std::remove_const_t<Ts>>())... {}
+
+  ViewIterator &operator++() {
+    BufferIterator<B>::operator++();
+    (BufferIterator<Ts>::operator++(), ...);
+    return *this;
+  }
+  bool operator==(const ViewIterator &other) { 
+    bool reg = BufferIterator<B>::operator==(other); 
+    bool ts[] = {BufferIterator<Ts>::operator==(other)...};
+    return reg && std::all_of(ts, ts + sizeof...(Ts), [](bool b) { return b; });
+  }
+  bool operator!=(const ViewIterator &other) { return !(*this == other); }
+
+  std::tuple<Ts *...> operator*() {
+    return std::tuple<Ts *...>(BufferIterator<Ts>::operator->()...);
+  }
+};
+
+template <typename B, typename... Ts> class View {
+public:
+  View() {
+    ensure_space();
+  }
+  void ensure_space() {
     auto &cm = ComponentManager<B>::inst();
     IComponentBuffer *cbs[] = {
         cm.template getOrCreateComponentBuffer<std::remove_const_t<Ts>>()...};
-    ComponentBuffer<B>* buffer = dynamic_cast<ComponentBuffer<B>*>(cm.registy);
+    ComponentBuffer<B> *buffer = dynamic_cast<ComponentBuffer<B> *>(cm.registy);
 
     for (auto cb : cbs) {
       if (cb != nullptr) {
@@ -301,22 +331,9 @@ public:
     }
   }
 
-  ViewIterator &operator++() {
-    BufferIterator<B>::operator++();
-    (BufferIterator<Ts>::operator++(), ...);
-    return *this;
+  ViewIterator<B, Ts...> begin() {
+    return ViewIterator<B, Ts...>(ComponentManager<B>::inst());
   }
-  bool operator==(const ViewIterator &other) { return false; }
-  bool operator!=(const ViewIterator &other) { return false; }
-
-  std::tuple<Ts *...> operator*() { return std::tuple<Ts*...>(BufferIterator<Ts>::operator->()...); }
-};
-
-template <typename B, typename... Ts> class View {
-public:
-  View() {}
-
-  ViewIterator<B, Ts...> begin() { return ViewIterator<B, Ts...>(); }
   ViewIterator<B, Ts...> end() { return ViewIterator<B, Ts...>(); }
 };
 

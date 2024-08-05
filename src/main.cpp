@@ -36,6 +36,16 @@ public:
   float a, b, c;
 };
 
+std::ostream &operator<<(std::ostream &os, const Node::Position &position) {
+  os << "{ x = " << position.x << ", y = " << position.y << "}";
+  return os;
+}
+
+std::ostream &operator<<(std::ostream &os, const Node::Velocity &velocity) {
+  os << "{ dx = " << velocity.dx << ", dy = " << velocity.dy << "}";
+  return os;
+}
+
 void Node::setPosition(float x, float y) {
   position()->x = x;
   position()->y = y;
@@ -43,7 +53,8 @@ void Node::setPosition(float x, float y) {
 
 void Node::updateVelocity() {
   auto view = fd::View<Node, Velocity>();
-  for (auto [v] : view) {
+  for (auto it = view.begin(); it != view.end(); ++it) {
+    auto [v] = *it;
     v->dx += 1;
     v->dy += 1;
   }
@@ -64,6 +75,11 @@ struct Image {
   uint32_t *pixels;
 };
 
+std::ostream &operator<<(std::ostream &os, const Image &image) {
+  os << "{ width = " << image.width << ", height = " << image.height << "}";
+  return os;
+}
+
 class Sprite : public Node {
 public:
   ENTITY(Sprite, Node)
@@ -71,7 +87,7 @@ public:
   COMPONENT(Image, image);
 };
 
-TEST_CASE("ECS") {
+int main() {
   Node *a = Node::create();
   a->setPosition(1, 2);
   Node *b = Node::create();
@@ -82,9 +98,9 @@ TEST_CASE("ECS") {
   d->setPosition(7, 8);
   Sprite *e = Sprite::create();
   e->setPosition(9, 10);
-
-  Node::updateVelocity();
-
+  dbg(*(a->velocity()));
+  Node::updateVelocity(); 
+  dbg(*(a->velocity()));
   REQUIRE(a->velocity()->dx == 2);
   REQUIRE(a->velocity()->dy == 2);
   REQUIRE(b->velocity()->dx == 2);
@@ -95,7 +111,6 @@ TEST_CASE("ECS") {
   REQUIRE(d->velocity()->dy == 2);
   REQUIRE(e->velocity()->dx == 2);
   REQUIRE(e->velocity()->dy == 2);
-
 
   Node::updatePosition();
 
@@ -109,5 +124,4 @@ TEST_CASE("ECS") {
   REQUIRE(d->position()->y == 9);
   REQUIRE(e->position()->x == 10);
   REQUIRE(e->position()->y == 11);
-
 }

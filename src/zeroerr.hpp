@@ -6485,13 +6485,15 @@ IReporter* IReporter::create(const std::string& name, UnitTest& ut) {
 }  // namespace zeroerr
 
 
+#ifndef ZEROERR_DISABLE_MAIN
+
 int main(int argc, const char** argv) {
     zeroerr::UnitTest().parseArgs(argc, argv).run();
     std::_Exit(0);
 }
 
 
-
+#endif
 
 
 #include <cstring>
