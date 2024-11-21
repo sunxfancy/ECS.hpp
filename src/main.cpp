@@ -1,12 +1,18 @@
+#define ZEROERR_DISABLE_MAIN
+#define ZEROERR_IMPLEMENTATION
+#include "zeroerr.hpp"
+
 #include "ECS.h"
 #include <cstdint>
 #include <list>
 
-class Node : public fd::Entity {
+class Node : public fd::Entity
+{
 public:
   ENTITY(Node, fd::Entity)
 
-  void release() override {
+  void release() override
+  {
     // fd::ReleaseEntity<Node>(id);
   }
 
@@ -15,16 +21,19 @@ public:
   static void updatePosition();
   static void updateVelocity();
 
-  struct Position {
+  struct Position
+  {
     float x, y;
   };
 
-  struct Velocity {
+  struct Velocity
+  {
     float dx = 1;
     float dy = 1;
   };
 
-  struct Tree {
+  struct Tree
+  {
     Node *parent;
     std::list<Node *> children;
   };
@@ -36,33 +45,40 @@ public:
   float a, b, c;
 };
 
-std::ostream &operator<<(std::ostream &os, const Node::Position &position) {
+std::ostream &operator<<(std::ostream &os, const Node::Position &position)
+{
   os << "{ x = " << position.x << ", y = " << position.y << "}";
   return os;
 }
 
-std::ostream &operator<<(std::ostream &os, const Node::Velocity &velocity) {
+std::ostream &operator<<(std::ostream &os, const Node::Velocity &velocity)
+{
   os << "{ dx = " << velocity.dx << ", dy = " << velocity.dy << "}";
   return os;
 }
 
-void Node::setPosition(float x, float y) {
+void Node::setPosition(float x, float y)
+{
   position()->x = x;
   position()->y = y;
 }
 
-void Node::updateVelocity() {
+void Node::updateVelocity()
+{
   auto view = fd::View<Node, Velocity>();
-  for (auto it = view.begin(); it != view.end(); ++it) {
+  for (auto it = view.begin(); it != view.end(); ++it)
+  {
     auto [v] = *it;
     v->dx += 1;
     v->dy += 1;
   }
 }
 
-void Node::updatePosition() {
+void Node::updatePosition()
+{
   auto view = fd::View<Node, Position, Velocity>();
-  for (auto [pos, v] : view) {
+  for (auto [pos, v] : view)
+  {
     pos->x += v->dx;
     pos->y += v->dy;
   }
@@ -70,24 +86,31 @@ void Node::updatePosition() {
 
 Node *Node::getParent() { return tree()->parent; }
 
-struct Image {
+struct Image
+{
   int width, height;
   uint32_t *pixels;
 };
 
-std::ostream &operator<<(std::ostream &os, const Image &image) {
+std::ostream &operator<<(std::ostream &os, const Image &image)
+{
   os << "{ width = " << image.width << ", height = " << image.height << "}";
   return os;
 }
 
-class Sprite : public Node {
+class Sprite : public Node
+{
 public:
   ENTITY(Sprite, Node)
 
   COMPONENT(Image, image);
 };
 
-int main() {
+extern void dump(fd::IComponentManager *icm, std::string name);
+
+int main()
+{
+
   Node *a = Node::create();
   a->setPosition(1, 2);
   Node *b = Node::create();
@@ -99,7 +122,9 @@ int main() {
   Sprite *e = Sprite::create();
   e->setPosition(9, 10);
   dbg(*(a->velocity()));
-  Node::updateVelocity(); 
+  dump(&fd::ComponentManager<Node>::inst(), "node.dot");
+
+  Node::updateVelocity();
   dbg(*(a->velocity()));
   REQUIRE(a->velocity()->dx == 2);
   REQUIRE(a->velocity()->dy == 2);

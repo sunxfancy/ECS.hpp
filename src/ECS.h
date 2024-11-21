@@ -1,6 +1,4 @@
 #pragma once
-#define ZEROERR_DISABLE_MAIN
-#define ZEROERR_IMPLEMENTATION
 #include "zeroerr.hpp"
 
 #include <cstdint>
@@ -38,6 +36,8 @@ public:
   virtual ~IComponentBuffer() = default;
   virtual uint32_t add() = 0;
   virtual void ensure_space(uint32_t) = 0;
+  virtual uint32_t size() const = 0;
+  virtual const std::type_info& getType() const = 0;
 
   IComponentManager *manager = nullptr;
   IComponentBuffer *parent = nullptr;
@@ -52,6 +52,8 @@ public:
 
   IComponentBuffer *registy = nullptr;
   std::map<std::type_index, IComponentBuffer *> components;
+
+  virtual const std::type_info& getType() const = 0;
 
   template <typename T>
   ComponentBuffer<T> *getOrCreateComponentBuffer(bool isRegisty = false) {
@@ -82,6 +84,8 @@ public:
     static ComponentManager instance;
     return instance;
   }
+
+  const std::type_info& getType() const override { return typeid(B); }
 
   ComponentManager() {
     if constexpr (!std::is_same_v<typename B::super, Entity>) {
@@ -133,6 +137,10 @@ public:
     container.push_back(T{});
     return id;
   }
+
+  uint32_t size() const override { return container.size(); }
+
+  const std::type_info& getType() const override { return typeid(T); }
 
   void ensure_space(uint32_t id) override {
     if (id >= container.size()) {
