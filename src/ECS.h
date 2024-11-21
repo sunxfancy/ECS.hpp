@@ -37,7 +37,7 @@ public:
   virtual uint32_t add() = 0;
   virtual void ensure_space(uint32_t) = 0;
   virtual uint32_t size() const = 0;
-  virtual const std::type_info& getType() const = 0;
+  virtual const std::type_info &getType() const = 0;
 
   IComponentManager *manager = nullptr;
   IComponentBuffer *parent = nullptr;
@@ -53,7 +53,20 @@ public:
   IComponentBuffer *registy = nullptr;
   std::map<std::type_index, IComponentBuffer *> components;
 
-  virtual const std::type_info& getType() const = 0;
+  virtual const std::type_info &getType() const = 0;
+
+  template <typename T>
+  ComponentBuffer<T> *getComponentBuffer(bool isRegisty = false) {
+    if (isRegisty) {
+      return dynamic_cast<ComponentBuffer<T> *>(registy);
+    }
+
+    auto it = components.find(std::type_index(typeid(T)));
+    if (it == components.end()) {
+      return nullptr;
+    }
+    return dynamic_cast<ComponentBuffer<T> *>(it->second);
+  }
 
   template <typename T>
   ComponentBuffer<T> *getOrCreateComponentBuffer(bool isRegisty = false) {
@@ -85,7 +98,7 @@ public:
     return instance;
   }
 
-  const std::type_info& getType() const override { return typeid(B); }
+  const std::type_info &getType() const override { return typeid(B); }
 
   ComponentManager() {
     if constexpr (!std::is_same_v<typename B::super, Entity>) {
@@ -140,12 +153,11 @@ public:
 
   uint32_t size() const override { return container.size(); }
 
-  const std::type_info& getType() const override { return typeid(T); }
+  const std::type_info &getType() const override { return typeid(T); }
 
-  void ensure_space(uint32_t id) override {
-    if (id >= container.size()) {
-      container.resize(id + 1);
-      dbg(container);
+  void ensure_space(uint32_t new_size) override {
+    if (new_size > container.size()) {
+      container.resize(new_size);
     }
   }
 
@@ -153,7 +165,9 @@ public:
     manager = cm;
 
     if (cm->parent != nullptr) {
-      IComponentBuffer *pcb = cm->parent->getOrCreateComponentBuffer<T>();
+      IComponentBuffer *pcb = cm->parent->getComponentBuffer<T>();
+      if (pcb == nullptr)
+        return;
       if (pcb->children == nullptr) {
         pcb->children = this;
       } else {
@@ -202,18 +216,12 @@ template <typename T> T *CreateEntity() {
   uint32_t id = registry->add();
   T &inst = registry->get(id);
   inst.id = id;
-  printf("registry ptr: %p\n", registry);
-  printf("this ptr: %p\n", &inst);
-  printf("id: %d\n", id);
 
   // This piece of code must be done after the entity is created
   // Otherwise, you may not see the components before first entity is created
   const IComponentManager *cm = &ComponentManager<T>::inst();
-  while (cm != nullptr) {
-    for (auto [key, component] : cm->components) {
-      component->ensure_space(id);
-    }
-    cm = cm->parent;
+  for (auto [key, component] : cm->components) {
+    component->ensure_space(id+1);
   }
 
   return &inst;
@@ -302,15 +310,23 @@ public:
   ViewIterator(ComponentManager<B> &cm)
       : BufferIterator<B>(dynamic_cast<ComponentBuffer<B> *>(cm.registy)),
         BufferIterator<Ts>(cm.template getOrCreateComponentBuffer<
-                           std::remove_const_t<Ts>>())... {}
+                           std::remove_const_t<Ts>>())... {
+    std::cout << cm.registy->size() << std::endl;
+    uint32_t sizes[] = {
+        (cm.template getOrCreateComponentBuffer<std::remove_const_t<Ts>>())
+            ->size()...};
+    for (int i = 0; i < sizeof...(Ts); i++) {
+      std::cout << sizes[i] << std::endl;
+    }
+  }
 
   ViewIterator &operator++() {
     BufferIterator<B>::operator++();
     (BufferIterator<Ts>::operator++(), ...);
     return *this;
   }
-  bool operator==(const ViewIterator &other) { 
-    bool reg = BufferIterator<B>::operator==(other); 
+  bool operator==(const ViewIterator &other) {
+    bool reg = BufferIterator<B>::operator==(other);
     bool ts[] = {BufferIterator<Ts>::operator==(other)...};
     return reg && std::all_of(ts, ts + sizeof...(Ts), [](bool b) { return b; });
   }
@@ -323,20 +339,18 @@ public:
 
 template <typename B, typename... Ts> class View {
 public:
-  View() {
-    ensure_space();
-  }
-  void ensure_space() {
-    auto &cm = ComponentManager<B>::inst();
-    IComponentBuffer *cbs[] = {
-        cm.template getOrCreateComponentBuffer<std::remove_const_t<Ts>>()...};
-    ComponentBuffer<B> *buffer = dynamic_cast<ComponentBuffer<B> *>(cm.registy);
+  View() { ensure_space(&ComponentManager<B>::inst());  }
+  void ensure_space(IComponentManager *cur) {
 
-    for (auto cb : cbs) {
-      if (cb != nullptr) {
-        cb->ensure_space(buffer->container.size());
+      IComponentBuffer *cbs[] = {cur->template getOrCreateComponentBuffer<
+          std::remove_const_t<Ts>>()...};
+
+      for (auto cb : cbs) {
+        if (cb != nullptr) {
+          cb->ensure_space(cur->registy->size());
+        }
       }
-    }
+
   }
 
   ViewIterator<B, Ts...> begin() {
