@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <memory>
 #include <type_traits>
 #include <typeindex>
 
@@ -21,6 +22,7 @@ namespace fd {
 
 class IComponentManager;
 template <typename T> class ComponentBuffer;
+template <typename T> class RegistryComponentBuffer;
 template <typename T> class BufferIterator;
 
 class Entity {
@@ -29,6 +31,7 @@ public:
   virtual IComponentManager &getComponentManager() const = 0;
 
   uint32_t id;
+  uint32_t flags;
 };
 
 class IComponentBuffer {
@@ -44,6 +47,23 @@ public:
   IComponentBuffer *children = nullptr, *next = nullptr;
 };
 
+class IEntityIterator {
+public:
+  virtual IEntityIterator &operator++() = 0;
+  virtual bool operator==(const IEntityIterator &other) = 0;
+  virtual bool operator!=(const IEntityIterator &other) = 0;
+  virtual Entity *operator->() = 0;
+  virtual Entity &operator*() = 0;
+};
+typedef std::unique_ptr<IEntityIterator> IEntityIteratorPtr;
+
+class IRegistryComponentBuffer {
+public:
+  virtual Entity *getEntity(uint32_t id) = 0;
+  virtual IEntityIteratorPtr beginEntity() = 0;
+  virtual IEntityIteratorPtr endEntity() = 0;
+};
+
 // ------------------------------------------------------------------------
 
 class IComponentManager {
@@ -55,12 +75,7 @@ public:
 
   virtual const std::type_info &getType() const = 0;
 
-  template <typename T>
-  ComponentBuffer<T> *getComponentBuffer(bool isRegisty = false) {
-    if (isRegisty) {
-      return dynamic_cast<ComponentBuffer<T> *>(registy);
-    }
-
+  template <typename T> ComponentBuffer<T> *getComponentBuffer() {
     auto it = components.find(std::type_index(typeid(T)));
     if (it == components.end()) {
       return nullptr;
@@ -68,22 +83,31 @@ public:
     return dynamic_cast<ComponentBuffer<T> *>(it->second);
   }
 
-  template <typename T>
-  ComponentBuffer<T> *getOrCreateComponentBuffer(bool isRegisty = false) {
-    if (isRegisty) {
-      if (registy == nullptr) {
-        registy = new ComponentBuffer<T>(this);
-      }
-      return dynamic_cast<ComponentBuffer<T> *>(registy);
-    }
+  template <typename T> RegistryComponentBuffer<T> *getRegistryComponentBuffer() {
+    if (registy == nullptr)
+      return nullptr;
+    return dynamic_cast<RegistryComponentBuffer<T> *>(registy);
+  }
 
+  template <typename T> ComponentBuffer<T> *getOrCreateComponentBuffer() {
     auto it = components.find(std::type_index(typeid(T)));
     if (it == components.end()) {
-      auto *cb = new ComponentBuffer<T>(this);
+      auto *cb = new ComponentBuffer<T>(
+          this, parent ? parent->getComponentBuffer<T>() : nullptr);
       components[std::type_index(typeid(T))] = cb;
       return cb;
     }
     return dynamic_cast<ComponentBuffer<T> *>(it->second);
+  }
+
+  template <typename T>
+  RegistryComponentBuffer<T> *getOrCreateRegistryComponentBuffer() {
+    if (registy == nullptr) {
+      registy = new RegistryComponentBuffer<T>(
+          this, parent ? parent->getRegistryComponentBuffer<typename T::super>()
+                       : nullptr);
+    }
+    return dynamic_cast<RegistryComponentBuffer<T> *>(registy);
   }
 };
 
@@ -127,8 +151,7 @@ public:
  * 为了实现这个结构，每个类都有一个 ComponentBuffer ，保存了所有的 Component
  * 数据
  */
-
-template <typename T> class ComponentBuffer : public IComponentBuffer {
+template <typename T> class CommonComponentBuffer : public IComponentBuffer {
 public:
   std::deque<T> container;
   T &get(uint32_t id) {
@@ -146,7 +169,6 @@ public:
 
   uint32_t add() override {
     uint32_t id = container.size();
-    printf("Size = %lu\n", sizeof(T));
     container.push_back(T{});
     return id;
   }
@@ -161,11 +183,10 @@ public:
     }
   }
 
-  ComponentBuffer(IComponentManager *cm) {
+  CommonComponentBuffer(IComponentManager *cm, IComponentBuffer *pcb) {
     manager = cm;
 
     if (cm->parent != nullptr) {
-      IComponentBuffer *pcb = cm->parent->getComponentBuffer<T>();
       if (pcb == nullptr)
         return;
       if (pcb->children == nullptr) {
@@ -178,9 +199,57 @@ public:
       parent = pcb;
     }
   }
+};
+
+template <typename T> class ComponentBuffer : public CommonComponentBuffer<T> {
+public:
+  ComponentBuffer(IComponentManager *cm, IComponentBuffer *pcb)
+      : CommonComponentBuffer<T>(cm, pcb) {}
 
   BufferIterator<T> begin() { return BufferIterator<T>(this); }
   BufferIterator<T> end() { return BufferIterator<T>(); }
+};
+
+template <typename T> class EntityIterator : public IEntityIterator {
+public:
+  EntityIterator(std::deque<T>::iterator it) : it(it) {}
+  std::deque<T>::iterator it;
+  IEntityIterator &operator++() override {
+    it++;
+    return *this;
+  }
+
+  bool operator==(const IEntityIterator &other) override {
+    return it == dynamic_cast<const EntityIterator<T>&>(other).it;
+  }
+  bool operator!=(const IEntityIterator &other) override {
+    return !(*this == other);
+  }
+
+  Entity *operator->() override { return &*it; }
+  Entity &operator*() override { return *it; }
+};
+
+template <typename T>
+class RegistryComponentBuffer : public CommonComponentBuffer<T>,
+                                public IRegistryComponentBuffer {
+public:
+  RegistryComponentBuffer(IComponentManager *cm, IComponentBuffer *pcb)
+      : CommonComponentBuffer<T>(cm, pcb) {}
+
+  Entity *getEntity(uint32_t id) override {
+    if (id >= this->container.size()) {
+      this->container.resize(id + 1);
+    }
+    return &this->container.at(id);
+  }
+
+  IEntityIteratorPtr beginEntity() override {
+    return IEntityIteratorPtr(new EntityIterator<T>(this->container.begin()));
+  }
+  IEntityIteratorPtr endEntity() override {
+    return IEntityIteratorPtr(new EntityIterator<T>(this->container.end()));
+  }
 };
 
 // ------------------------------------------------------------------------
@@ -204,15 +273,10 @@ public:
 
 template <typename T> class OptionalComponent {};
 
-template <typename T> class Registry {
-public:
-  T instance;
-  uint32_t flags;
-};
-
 template <typename T> T *CreateEntity() {
-  static ComponentBuffer<T> *registry =
-      ComponentManager<T>::inst().template getOrCreateComponentBuffer<T>(true);
+  static RegistryComponentBuffer<T> *registry =
+      ComponentManager<T>::inst()
+          .template getOrCreateRegistryComponentBuffer<T>();
   uint32_t id = registry->add();
   T &inst = registry->get(id);
   inst.id = id;
@@ -221,7 +285,7 @@ template <typename T> T *CreateEntity() {
   // Otherwise, you may not see the components before first entity is created
   const IComponentManager *cm = &ComponentManager<T>::inst();
   for (auto [key, component] : cm->components) {
-    component->ensure_space(id+1);
+    component->ensure_space(id + 1);
   }
 
   return &inst;
@@ -308,7 +372,7 @@ public:
   ViewIterator() {}
 
   ViewIterator(ComponentManager<B> &cm)
-      : BufferIterator<B>(dynamic_cast<ComponentBuffer<B> *>(cm.registy)),
+      : BufferIterator<B>(dynamic_cast<RegistryComponentBuffer<B> *>(cm.registy)),
         BufferIterator<Ts>(cm.template getOrCreateComponentBuffer<
                            std::remove_const_t<Ts>>())... {
     std::cout << cm.registy->size() << std::endl;
@@ -339,18 +403,22 @@ public:
 
 template <typename B, typename... Ts> class View {
 public:
-  View() { ensure_space(&ComponentManager<B>::inst());  }
-  void ensure_space(IComponentManager *cur) {
+  View() { ensure_space(ComponentManager<B>::inst().registy); }
+  void ensure_space(IComponentBuffer *cur) {
+    IComponentManager *cm = cur->manager;
+    std::vector<IComponentBuffer *> cbs = {
+        cm->template getOrCreateComponentBuffer<std::remove_const_t<Ts>>()...};
 
-      IComponentBuffer *cbs[] = {cur->template getOrCreateComponentBuffer<
-          std::remove_const_t<Ts>>()...};
-
-      for (auto cb : cbs) {
-        if (cb != nullptr) {
-          cb->ensure_space(cur->registy->size());
-        }
+    for (auto cb : cbs) {
+      if (cb != nullptr) {
+        cb->ensure_space(cur->size());
       }
+    }
 
+    if (cur->children != nullptr)
+      ensure_space(cur->children);
+    if (cur->next != nullptr)
+      ensure_space(cur->next);
   }
 
   ViewIterator<B, Ts...> begin() {
