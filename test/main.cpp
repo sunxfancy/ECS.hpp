@@ -2,21 +2,21 @@
 #define ZEROERR_IMPLEMENTATION
 #include "zeroerr.hpp"
 
-#include "ECS.h"
+#include "ECS.hpp"
 #include <cstdint>
 #include <list>
 
-extern void dump(fd::IComponentManager *icm, std::string name);
+extern void dump(ecs::IComponentManager *icm, std::string name);
 
 
-class Node : public fd::Entity
+class Node : public ecs::Entity
 {
 public:
-  ENTITY(Node, fd::Entity)
+  ENTITY(Node, ecs::Entity)
 
   void release() override
   {
-    // fd::ReleaseEntity<Node>(id);
+    // ecs::ReleaseEntity<Node>(id);
   }
 
   void setPosition(float x, float y);
@@ -68,8 +68,8 @@ void Node::setPosition(float x, float y)
 
 void Node::updateVelocity()
 {
-  auto view = fd::View<Node, Velocity>();
-  dump(&fd::ComponentManager<Node>::inst(), "node6.dot");
+  auto view = ecs::View<Node, Velocity>();
+  dump(&ecs::ComponentManager<Node>::inst(), "node6.dot");
   for (auto it = view.begin(); it != view.end(); ++it)
   {
     auto [v] = *it;
@@ -80,7 +80,7 @@ void Node::updateVelocity()
 
 void Node::updatePosition()
 {
-  auto view = fd::View<Node, Position, Velocity>();
+  auto view = ecs::View<Node, Position, Velocity>();
   for (auto [pos, v] : view)
   {
     pos->x += v->dx;
@@ -116,20 +116,20 @@ int main()
 
   Node *a = Node::create();
   a->setPosition(1, 2);
-  dump(&fd::ComponentManager<Node>::inst(), "node1.dot");
+  dump(&ecs::ComponentManager<Node>::inst(), "node1.dot");
   Node *b = Node::create();
   b->setPosition(3, 4);
-  dump(&fd::ComponentManager<Node>::inst(), "node2.dot");
+  dump(&ecs::ComponentManager<Node>::inst(), "node2.dot");
   Sprite *c = Sprite::create();
   c->setPosition(5, 6);
-  dump(&fd::ComponentManager<Node>::inst(), "node3.dot");
+  dump(&ecs::ComponentManager<Node>::inst(), "node3.dot");
   Sprite *d = Sprite::create();
   d->setPosition(7, 8);
-  dump(&fd::ComponentManager<Node>::inst(), "node4.dot");
+  dump(&ecs::ComponentManager<Node>::inst(), "node4.dot");
   Sprite *e = Sprite::create();
   e->setPosition(9, 10);
   dbg(*(a->velocity()));
-  dump(&fd::ComponentManager<Node>::inst(), "node5.dot");
+  dump(&ecs::ComponentManager<Node>::inst(), "node5.dot");
 
   Node::updateVelocity();
   dbg(*(a->velocity()));

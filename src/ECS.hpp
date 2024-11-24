@@ -9,17 +9,20 @@
 #include <typeindex>
 
 #define COMPONENT(T, name) \
-  fd::Component<T> name() { return fd::Component<T>(this); }
+  ecs::ComponentRef<T> name() { return ecs::ComponentRef<T>(this); }
+
+#define OPTIONAL_COMPONENT(T, name) \
+  ecs::OptionalComponentRef<T> name() { return ecs::OptionalComponentRef<T>(this); }
 
 #define ENTITY(T, BASE)                                       \
   using super = BASE;                                         \
-  fd::IComponentManager &getComponentManager() const override \
+  ecs::IComponentManager &getComponentManager() const override \
   {                                                           \
-    return fd::ComponentManager<T>::inst();                   \
+    return ecs::ComponentManager<T>::inst();                   \
   }                                                           \
-  static T *create() { return fd::CreateEntity<T>(); }
+  static T *create() { return ecs::CreateEntity<T>(); }
 
-namespace fd
+namespace ecs
 {
 
   class IComponentManager;
@@ -30,6 +33,12 @@ namespace fd
   template <typename T>
   class BufferIterator;
 
+  /**
+   * @brief Entity 是一个抽象类，用于表示一个实体，实体是一个具有一定属性的对象
+   * 
+   * Entity 本身并不存储任何数据，而是通过 Component 来存储数据
+   * Entity 是所有用户定义的实体类的基类，而且会被系统自动用来创建 Registry 来存放其下的所有实例
+   */
   class Entity
   {
   public:
@@ -40,6 +49,13 @@ namespace fd
     uint32_t flags;
   };
 
+
+  /**
+   * @brief IComponentBuffer 是一个抽象类，用于表示一个存储 Component 数据的容器
+   * 这里 IComponentBuffer 使用了类型擦除技术，其具体的子类实现了对应类型的 ComponentBuffer，即：
+   * IComponentBuffer -> ComponentBuffer<T>
+   *  而 ComponentBuffer<T> 是一个容器模板类，用来存储 T 类型的 Component 数据
+   */
   class IComponentBuffer
   {
   public:
@@ -65,6 +81,9 @@ namespace fd
   };
   typedef std::unique_ptr<IEntityIterator> IEntityIteratorPtr;
 
+  /**
+   * @brief IRegistryComponentBuffer 是一个额外的抽象接口类，用来表示 Registry 的额外接口
+   */
   class IRegistryComponentBuffer
   {
   public:
@@ -75,6 +94,14 @@ namespace fd
 
   // ------------------------------------------------------------------------
 
+
+  /**
+   * @brief IComponentManager 是一个管理所有 Component 的ComponentManager的抽象接口
+   * 
+   * IComponentManager 使用了类型擦除技术，其具体的子类实现了对应类型的 ComponentManager，即：
+   * IComponentManager -> ComponentManager<T>
+   *  而 ComponentManager<T> 是一个单例模板类，用于记录所有 T 类型的 Entity 都有哪些 Component
+   */
   class IComponentManager
   {
   public:
@@ -255,8 +282,8 @@ namespace fd
   class EntityIterator : public IEntityIterator
   {
   public:
-    EntityIterator(std::deque<T>::iterator it) : it(it) {}
-    std::deque<T>::iterator it;
+    EntityIterator(typename std::deque<T>::iterator it) : it(it) {}
+    typename std::deque<T>::iterator it;
     IEntityIterator &operator++(int) override
     {
       it++;
@@ -306,12 +333,12 @@ namespace fd
   // ------------------------------------------------------------------------
 
   template <typename T>
-  class Component
+  class ComponentRef
   {
     const Entity *entity;
 
   public:
-    Component(const Entity *ent) : entity(ent) {}
+    ComponentRef(const Entity *ent) : entity(ent) {}
 
     IComponentManager &CM() const { return entity->getComponentManager(); }
 
@@ -326,8 +353,15 @@ namespace fd
   };
 
   template <typename T>
-  class OptionalComponent
+  class OptionalComponentRef
   {
+    const Entity *entity;
+  public:
+    OptionalComponentRef(const Entity *ent) : entity(ent) {}
+
+    IComponentManager &CM() const { return entity->getComponentManager(); }
+
+    // TODO: Implement this with a ComponentMap
   };
 
   template <typename T>
@@ -445,7 +479,7 @@ namespace fd
 
   private:
     CBType *cb = nullptr;
-    std::deque<T>::iterator it;
+    typename std::deque<T>::iterator it;
   };
 
   template <typename T>
@@ -626,4 +660,4 @@ namespace fd
     ViewIterator<B, Ts...> end() { return ViewIterator<B, Ts...>(); }
   };
 
-} // namespace fd
+} // namespace ecs

@@ -1,15 +1,15 @@
 #include "dsv.hpp"
-#include "ECS.h"
+#include "ECS.hpp"
 #include <fstream>
 #include <cxxabi.h>
 
-void dsviz_show(fd::IComponentBuffer *P, DSViz::IViz &viz);
-typedef DSViz::Mock<fd::IComponentBuffer, dsviz_show> mock_icb;
+void dsviz_show(ecs::IComponentBuffer *P, DSViz::IViz &viz);
+typedef DSViz::Mock<ecs::IComponentBuffer, dsviz_show> mock_icb;
 
-void dsviz_show(fd::IComponentManager *P, DSViz::IViz &viz);
-typedef DSViz::Mock<fd::IComponentManager, dsviz_show> mock_icm;
+void dsviz_show(ecs::IComponentManager *P, DSViz::IViz &viz);
+typedef DSViz::Mock<ecs::IComponentManager, dsviz_show> mock_icm;
 
-void dsviz_show(fd::IComponentBuffer *P, DSViz::IViz &viz)
+void dsviz_show(ecs::IComponentBuffer *P, DSViz::IViz &viz)
 {
     DSViz::TableNode node(viz);
     viz.setName(mock_icb::get(P), node.name);
@@ -35,7 +35,7 @@ void dsviz_show(fd::IComponentBuffer *P, DSViz::IViz &viz)
     }
 }
 
-void dsviz_show(fd::IComponentManager *P, DSViz::IViz &viz)
+void dsviz_show(ecs::IComponentManager *P, DSViz::IViz &viz)
 {
     DSViz::TableNode node(viz);
     viz.setName(mock_icm::get(P), node.name);
@@ -65,7 +65,7 @@ void dsviz_show(fd::IComponentManager *P, DSViz::IViz &viz)
     }
 }
 
-void dump(fd::IComponentManager *icm, std::string name)
+void dump(ecs::IComponentManager *icm, std::string name)
 {
     DSViz::Dot dot;
     dot.load_ds(mock_icm::get(icm));
