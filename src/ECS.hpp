@@ -1,12 +1,15 @@
 #pragma once
-#include "zeroerr.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <deque>
+#include <iostream>
 #include <map>
 #include <memory>
+#include <tuple>
 #include <type_traits>
 #include <typeindex>
+#include <vector>
 
 #define COMPONENT(T, name) \
   ecs::ComponentRef<T> name() { return ecs::ComponentRef<T>(this); }
@@ -150,9 +153,16 @@ namespace ecs
     {
       if (registy == nullptr)
       {
-        registy = new RegistryComponentBuffer<T>(
-            this, parent ? parent->getRegistryComponentBuffer<typename T::super>()
-                         : nullptr);
+        IComponentBuffer *pcb = nullptr;
+        if (parent != nullptr)
+        {
+          // Avoid instantiating RegistryComponentBuffer<Entity> (abstract) on MSVC
+          if constexpr (!std::is_same_v<typename T::super, Entity>)
+          {
+            pcb = parent->template getRegistryComponentBuffer<typename T::super>();
+          }
+        }
+        registy = new RegistryComponentBuffer<T>(this, pcb);
       }
       return dynamic_cast<RegistryComponentBuffer<T> *>(registy);
     }
@@ -597,14 +607,6 @@ namespace ecs
           BufferIterator<Ts>(cm.template getOrCreateComponentBuffer<
                              std::remove_const_t<Ts>>())...
     {
-      std::cout << cm.registy->size() << std::endl;
-      uint32_t sizes[] = {
-          (cm.template getOrCreateComponentBuffer<std::remove_const_t<Ts>>())
-              ->size()...};
-      for (int i = 0; i < sizeof...(Ts); i++)
-      {
-        std::cout << sizes[i] << std::endl;
-      }
     }
 
     ViewIterator &operator++()
