@@ -634,7 +634,12 @@ namespace ecs
   class View
   {
   public:
-    View() { ensure_space(ComponentManager<B>::inst().registy); }
+    View()
+    {
+      auto *reg = ComponentManager<B>::inst()
+                      .template getOrCreateRegistryComponentBuffer<B>();
+      ensure_space(reg);
+    }
     void ensure_space(IComponentBuffer *cur)
     {
       IComponentManager *cm = cur->manager;
