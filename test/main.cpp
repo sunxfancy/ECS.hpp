@@ -1,4 +1,4 @@
-#define ZEROERR_DISABLE_MAIN
+#define ZEROERR_NO_MAIN
 #define ZEROERR_IMPLEMENTATION
 #include "zeroerr.hpp"
 
@@ -113,6 +113,18 @@ public:
 
 int main()
 {
+  // Regression: View before any CreateEntity must not crash on null registry.
+  {
+    auto empty_view = ecs::View<Node, Node::Velocity>();
+    int empty_count = 0;
+    for (auto [v] : empty_view)
+    {
+      (void)v;
+      ++empty_count;
+    }
+    REQUIRE(empty_count == 0);
+    REQUIRE(ecs::ComponentManager<Node>::inst().registy != nullptr);
+  }
 
   Node *a = Node::create();
   a->setPosition(1, 2);

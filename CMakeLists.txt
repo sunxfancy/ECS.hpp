@@ -19,7 +19,5 @@ set(TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/test/visualize.cpp
 )
 
-add_executable(ecs_test ${TEST_SOURCES})
-
-add_executable(view_empty_smoke ${CMAKE_SOURCE_DIR}/test/view_empty_smoke.cpp)
+add_executable(ecs_test ${TEST_SOURCES}) 
 
