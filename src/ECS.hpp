@@ -21,14 +21,18 @@
   using super = BASE;                                         \
   ecs::IComponentManager &getComponentManager() const override \
   {                                                           \
-    return ecs::ComponentManager<T>::inst();                   \
+    return table->template getOrCreateManager<T>();            \
   }                                                           \
-  static T *create() { return ecs::CreateEntity<T>(); }
+  static T *create() { return ecs::CreateEntity<T>(); }        \
+  static T *create(ecs::Table &tbl) { return ecs::CreateEntity<T>(tbl); }
 
 namespace ecs
 {
 
+  class Entity;
   class IComponentManager;
+  template <typename T>
+  class ComponentManager;
   template <typename T>
   class ComponentBuffer;
   template <typename T>
@@ -42,6 +46,36 @@ namespace ecs
     Table() = default;
     Table(const Table &) = delete;
     Table &operator=(const Table &) = delete;
+
+    template <typename T>
+    ComponentManager<T> &getOrCreateManager()
+    {
+      auto key = std::type_index(typeid(T));
+      auto it = managers_.find(key);
+      if (it != managers_.end())
+        return *static_cast<ComponentManager<T> *>(it->second);
+
+      IComponentManager *parent_storage = nullptr;
+      if constexpr (!std::is_same_v<typename T::super, Entity>)
+      {
+        parent_storage = &getOrCreateManager<typename T::super>();
+      }
+      auto *cm = new ComponentManager<T>(this, parent_storage);
+      managers_[key] = cm;
+      return *cm;
+    }
+
+    template <typename T>
+    ComponentManager<T> *getManager()
+    {
+      auto it = managers_.find(std::type_index(typeid(T)));
+      if (it == managers_.end())
+        return nullptr;
+      return static_cast<ComponentManager<T> *>(it->second);
+    }
+
+  private:
+    std::map<std::type_index, IComponentManager *> managers_;
   };
 
   inline Table &default_table()
@@ -95,6 +129,7 @@ namespace ecs
 
     uint32_t id;
     uint32_t flags;
+    Table *table = nullptr;
   };
 
 
@@ -153,6 +188,7 @@ namespace ecs
   class IComponentManager
   {
   public:
+    Table *table = nullptr;
     IComponentManager *parent = nullptr;
 
     IComponentBuffer *registy = nullptr;
@@ -221,20 +257,12 @@ namespace ecs
   class ComponentManager : public IComponentManager
   {
   public:
-    static ComponentManager &inst()
-    {
-      static ComponentManager instance;
-      return instance;
-    }
-
     const std::type_info &getType() const override { return typeid(B); }
 
-    ComponentManager()
+    ComponentManager(Table *t, IComponentManager *parent_storage)
     {
-      if constexpr (!std::is_same_v<typename B::super, Entity>)
-      {
-        parent = &ComponentManager<typename B::super>::inst();
-      }
+      this->table = t;
+      this->parent = parent_storage;
     }
   };
 
@@ -420,24 +448,30 @@ namespace ecs
   };
 
   template <typename T>
-  T *CreateEntity()
+  T *CreateEntity(Table &table)
   {
-    static RegistryComponentBuffer<T> *registry =
-        ComponentManager<T>::inst()
-            .template getOrCreateRegistryComponentBuffer<T>();
+    auto *registry = table.template getOrCreateManager<T>()
+                         .template getOrCreateRegistryComponentBuffer<T>();
     uint32_t id = registry->add();
     T &inst = registry->get(id);
     inst.id = id;
+    inst.table = &table;
 
     // This piece of code must be done after the entity is created
     // Otherwise, you may not see the components before first entity is created
-    const IComponentManager *cm = &ComponentManager<T>::inst();
+    IComponentManager *cm = &table.template getOrCreateManager<T>();
     for (auto [key, component] : cm->components)
     {
       component->ensure_space(id + 1);
     }
 
     return &inst;
+  }
+
+  template <typename T>
+  T *CreateEntity()
+  {
+    return CreateEntity<T>(*current());
   }
 
   // ------------------------------------------------------------------------
@@ -647,7 +681,7 @@ namespace ecs
   public:
     ViewIterator() {}
 
-    ViewIterator(ComponentManager<B> &cm)
+    ViewIterator(IComponentManager &cm)
         : RegistryBufferIterator<B>(cm.registy),
           BufferIterator<Ts>(cm.template getOrCreateComponentBuffer<
                              std::remove_const_t<Ts>>())...
@@ -678,13 +712,18 @@ namespace ecs
   template <typename B, typename... Ts>
   class View
   {
+    Table *table_;
+
   public:
-    View()
+    View() : View(*current()) {}
+
+    explicit View(Table &table) : table_(&table)
     {
-      auto *reg = ComponentManager<B>::inst()
+      auto *reg = table.template getOrCreateManager<B>()
                       .template getOrCreateRegistryComponentBuffer<B>();
       ensure_space(reg);
     }
+
     void ensure_space(IComponentBuffer *cur)
     {
       IComponentManager *cm = cur->manager;
@@ -707,7 +746,7 @@ namespace ecs
 
     ViewIterator<B, Ts...> begin()
     {
-      return ViewIterator<B, Ts...>(ComponentManager<B>::inst());
+      return ViewIterator<B, Ts...>(table_->template getOrCreateManager<B>());
     }
     ViewIterator<B, Ts...> end() { return ViewIterator<B, Ts...>(); }
   };

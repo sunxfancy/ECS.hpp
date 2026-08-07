@@ -1,4 +1,3 @@
-#define ZEROERR_NO_MAIN
 #define ZEROERR_IMPLEMENTATION
 #include "zeroerr.hpp"
 
@@ -69,7 +68,7 @@ void Node::setPosition(float x, float y)
 void Node::updateVelocity()
 {
   auto view = ecs::View<Node, Velocity>();
-  dump(&ecs::ComponentManager<Node>::inst(), "node6.dot");
+  dump(&ecs::current()->getOrCreateManager<Node>(), "node6.dot");
   for (auto it = view.begin(); it != view.end(); ++it)
   {
     auto [v] = *it;
@@ -111,7 +110,7 @@ public:
 };
 
 
-int main()
+TEST_CASE("main test")
 {
   // Regression: View before any CreateEntity must not crash on null registry.
   {
@@ -123,25 +122,25 @@ int main()
       ++empty_count;
     }
     REQUIRE(empty_count == 0);
-    REQUIRE(ecs::ComponentManager<Node>::inst().registy != nullptr);
+    REQUIRE(ecs::current()->getOrCreateManager<Node>().registy != nullptr);
   }
 
   Node *a = Node::create();
   a->setPosition(1, 2);
-  dump(&ecs::ComponentManager<Node>::inst(), "node1.dot");
+  dump(&ecs::current()->getOrCreateManager<Node>(), "node1.dot");
   Node *b = Node::create();
   b->setPosition(3, 4);
-  dump(&ecs::ComponentManager<Node>::inst(), "node2.dot");
+  dump(&ecs::current()->getOrCreateManager<Node>(), "node2.dot");
   Sprite *c = Sprite::create();
   c->setPosition(5, 6);
-  dump(&ecs::ComponentManager<Node>::inst(), "node3.dot");
+  dump(&ecs::current()->getOrCreateManager<Node>(), "node3.dot");
   Sprite *d = Sprite::create();
   d->setPosition(7, 8);
-  dump(&ecs::ComponentManager<Node>::inst(), "node4.dot");
+  dump(&ecs::current()->getOrCreateManager<Node>(), "node4.dot");
   Sprite *e = Sprite::create();
   e->setPosition(9, 10);
   dbg(*(a->velocity()));
-  dump(&ecs::ComponentManager<Node>::inst(), "node5.dot");
+  dump(&ecs::current()->getOrCreateManager<Node>(), "node5.dot");
 
   Node::updateVelocity();
   dbg(*(a->velocity()));
@@ -168,4 +167,5 @@ int main()
   // REQUIRE(d->position()->y == 9);
   // REQUIRE(e->position()->x == 10);
   // REQUIRE(e->position()->y == 11);
+
 }

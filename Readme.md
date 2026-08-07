@@ -67,6 +67,19 @@ int main()
 
 The component macros will create the necessary boilerplate code to access the components of the entities. The `create` method is used to create instances of the entities.
 
+Entities live in a `Table` (world). `Node::create()` writes to the thread-local current table (`ecs::default_table()` by default). You can also pass a table explicitly, or bind one with `ecs::ScopedTable` / `ecs::set_current`.
+
+```cpp
+ecs::Table level;
+{
+  ecs::ScopedTable guard(level);
+  Node *a = Node::create();                 // into level
+  auto view = ecs::View<Node, Node::Position>();  // current table
+}
+Node *b = Node::create(level);              // explicit
+auto view = ecs::View<Node, Node::Position>(level);
+```
+
 If you want handle all the entities under a class, you can use the View class to iterate all the entities under the class and its subclasses.
 
 ```cpp
