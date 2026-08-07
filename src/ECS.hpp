@@ -36,6 +36,51 @@ namespace ecs
   template <typename T>
   class BufferIterator;
 
+  class Table
+  {
+  public:
+    Table() = default;
+    Table(const Table &) = delete;
+    Table &operator=(const Table &) = delete;
+  };
+
+  inline Table &default_table()
+  {
+    static Table t;
+    return t;
+  }
+
+  inline Table *&current_slot()
+  {
+    thread_local Table *cur = nullptr;
+    return cur;
+  }
+
+  inline Table *current()
+  {
+    Table *c = current_slot();
+    return c ? c : &default_table();
+  }
+
+  inline void set_current(Table *t)
+  {
+    current_slot() = t ? t : &default_table();
+  }
+
+  struct ScopedTable
+  {
+    explicit ScopedTable(Table &t) : prev_(current_slot())
+    {
+      current_slot() = &t;
+    }
+    ~ScopedTable() { current_slot() = prev_; }
+    ScopedTable(const ScopedTable &) = delete;
+    ScopedTable &operator=(const ScopedTable &) = delete;
+
+  private:
+    Table *prev_;
+  };
+
   /**
    * @brief Entity 是一个抽象类，用于表示一个实体，实体是一个具有一定属性的对象
    * 
