@@ -16,6 +16,7 @@ include_directories(
 
 set(TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/test/table_world.cpp
+    ${CMAKE_SOURCE_DIR}/test/defer_commit.cpp
     ${CMAKE_SOURCE_DIR}/test/visualize.cpp
     ${CMAKE_SOURCE_DIR}/test/main.cpp
 )

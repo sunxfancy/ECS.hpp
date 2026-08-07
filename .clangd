@@ -1,2 +1,12 @@
-CompileFlags:
-  CompilationDatabase: build/win32-debug
+﻿CompileFlags:
+  CompilationDatabase: build
+  # VS 2026 (v18) is newer than clangd's builtin MSVC discovery fallback.
+  # compile_commands uses cl.exe, so pass system includes via clang-cl's /clang: escape.
+  Add:
+    - "/clang:-isystemC:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.50.35717/include"
+    - "/clang:-isystemC:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/ucrt"
+    - "/clang:-isystemC:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/um"
+    - "/clang:-isystemC:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/shared"
+  Remove:
+    - -glldb
+    - -D_GLIBCXX_DEBUG
