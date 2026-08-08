@@ -19,7 +19,7 @@ Entities are ordinary C++ classes. Components are plain structs accessed through
 ## Requirements
 
 - C++17 compiler (GCC, Clang, or MSVC)
-- CMake ≥ 3.15 (for the test suite)
+- CMake ≥ 3.20 (for the test suite)
 - No external runtime dependencies
 
 ## Build & Test
@@ -38,7 +38,16 @@ On Windows (MSVC):
 cmake -S . -B build
 cmake --build build --config Debug
 .\build\Debug\ecs_test.exe
+# or: ctest --test-dir build -C Debug --output-on-failure
 ```
+
+### Continuous Integration
+
+GitHub Actions runs the suite on every push/PR (`.github/workflows/ci.yml`):
+
+- Ubuntu + Clang (Debug & Release)
+- Windows + MSVC (Debug)
+- macOS + AppleClang (Debug)
 
 The test binary links several translation units under `test/`:
 

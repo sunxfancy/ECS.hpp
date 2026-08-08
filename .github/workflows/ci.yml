@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "cursor/**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu Clang
+            os: ubuntu-latest
+            cxx: clang++
+            build_type: Debug
+          - name: Ubuntu Clang Release
+            os: ubuntu-latest
+            cxx: clang++
+            build_type: Release
+          - name: Windows MSVC
+            os: windows-latest
+            cxx: cl
+            build_type: Debug
+          - name: macOS AppleClang
+            os: macos-latest
+            cxx: clang++
+            build_type: Debug
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Clang (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Configure (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build (Unix)
+        if: runner.os != 'Windows'
+        run: cmake --build build --parallel
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: cmake --build build --config ${{ matrix.build_type }} --parallel
+
+      - name: Test (Unix)
+        if: runner.os != 'Windows'
+        run: ctest --test-dir build --output-on-failure --verbose
+
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
+        run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure --verbose

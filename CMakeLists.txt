@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.20)
 project(ECS_hpp)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
@@ -37,5 +37,7 @@ set(TEST_SOURCES
 add_executable(ecs_test ${TEST_SOURCES})
 
 enable_testing()
-add_test(NAME ecs_test COMMAND ecs_test)
+# $<TARGET_FILE:...> resolves Debug/Release output dirs on multi-config
+# generators (Visual Studio) so `ctest -C Debug` finds the binary.
+add_test(NAME ecs_test COMMAND $<TARGET_FILE:ecs_test>)
 

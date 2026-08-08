@@ -5,9 +5,11 @@ The suite builds a single binary `ecs_test` (CMake target) using [zeroerr](test/
 ## Running
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=g++
+# Prefer Clang — zeroerr TEST_CASE macros disagree with GCC _Pragma placement.
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=clang++
 cmake --build build -j
 ./build/ecs_test
+# or: ctest --test-dir build --output-on-failure
 ```
 
 MSVC:
@@ -16,7 +18,22 @@ MSVC:
 cmake -S . -B build
 cmake --build build --config Debug
 .\build\Debug\ecs_test.exe
+# or: ctest --test-dir build -C Debug --output-on-failure
 ```
+
+## Continuous Integration
+
+Workflow: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
+
+| Job | Runner | Compiler | Config |
+| --- | --- | --- | --- |
+| Ubuntu Clang | `ubuntu-latest` | `clang++` | Debug |
+| Ubuntu Clang Release | `ubuntu-latest` | `clang++` | Release |
+| Windows MSVC | `windows-latest` | MSVC (VS 2022) | Debug |
+| macOS AppleClang | `macos-latest` | AppleClang | Debug |
+
+Triggers: pushes to `main` / `cursor/**`, and pull requests targeting `main`.  
+Each job configures with CMake, builds `ecs_test`, then runs `ctest --output-on-failure`.
 
 ## Layout
 
