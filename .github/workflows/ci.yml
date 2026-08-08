@@ -45,6 +45,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang
 
+      - name: Setup MSVC + Ninja
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Ninja (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ninja -y
+
       - name: Configure (Unix)
         if: runner.os != 'Windows'
         run: |
@@ -54,20 +62,13 @@ jobs:
 
       - name: Configure (Windows)
         if: runner.os == 'Windows'
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+        run: |
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
+            -DCMAKE_CXX_COMPILER=cl
 
-      - name: Build (Unix)
-        if: runner.os != 'Windows'
+      - name: Build
         run: cmake --build build --parallel
 
-      - name: Build (Windows)
-        if: runner.os == 'Windows'
-        run: cmake --build build --config ${{ matrix.build_type }} --parallel
-
-      - name: Test (Unix)
-        if: runner.os != 'Windows'
+      - name: Test
         run: ctest --test-dir build --output-on-failure --verbose
-
-      - name: Test (Windows)
-        if: runner.os == 'Windows'
-        run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure --verbose
