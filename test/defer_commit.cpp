@@ -256,6 +256,20 @@ TEST_CASE("deferred Sprite publish visible to View<Node>")
   REQUIRE(sprites == 1);
 }
 
+TEST_CASE("deferred subclass-only publish links into empty base View")
+{
+  ecs::Table table;
+  {
+    ecs::ScopedDefer guard(table);
+    dc::Sprite *s = dc::Sprite::create(table);
+    s->pos()->x = 20;
+    s->img()->w = 32;
+    REQUIRE(count_nodes(table) == 0);
+  }
+  REQUIRE(count_nodes(table) == 1);
+  REQUIRE(sum_pos(table) == 20);
+}
+
 TEST_CASE("defer on one Table does not affect another")
 {
   ecs::Table a;

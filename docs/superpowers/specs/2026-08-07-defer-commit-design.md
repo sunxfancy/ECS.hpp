@@ -1,7 +1,7 @@
 # Defer / Commit Command Buffer Design
 
 Date: 2026-08-07  
-Status: Approved for planning
+Status: Implemented (see `src/ECS.hpp`, `test/defer_commit.cpp`, `test/handles.cpp`, `docs/API.md`)
 
 ## Goal
 

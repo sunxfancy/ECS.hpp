@@ -323,9 +323,12 @@ namespace ecs
       auto it = components.find(std::type_index(typeid(T)));
       if (it == components.end())
       {
+        // Always ensure the parent buffer exists first so inheritance links
+        // (parent→children) are formed even when a subclass component is
+        // touched before any base-type entity/buffer was created.
         IComponentBuffer *parent_buf = nullptr;
         if (parent != nullptr)
-          parent_buf = parent->getComponentBuffer<T>();
+          parent_buf = parent->template getOrCreateComponentBuffer<T>();
         auto *cb = new ComponentBuffer<T>(this, parent_buf);
         components[std::type_index(typeid(T))] = cb;
         return cb;
@@ -338,11 +341,14 @@ namespace ecs
     {
       if (registy == nullptr)
       {
+        // Recursively create the super registry in this Table so View<Base>
+        // can walk children links when only a subclass was constructed
+        // (including deferred publish into a previously empty base).
         IComponentBuffer *pcb = nullptr;
         if (parent != nullptr)
         {
           if constexpr (!std::is_same_v<typename T::super, Entity>)
-            pcb = parent->template getRegistryComponentBuffer<typename T::super>();
+            pcb = parent->template getOrCreateRegistryComponentBuffer<typename T::super>();
         }
         registy = new RegistryComponentBuffer<T>(this, pcb);
       }

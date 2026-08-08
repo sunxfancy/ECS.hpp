@@ -1,7 +1,7 @@
 # Table (World) Abstraction Design
 
 Date: 2026-08-07  
-Status: Approved for planning
+Status: Implemented (see `src/ECS.hpp`, `test/table_world.cpp`, `docs/API.md`)
 
 ## Goal
 
