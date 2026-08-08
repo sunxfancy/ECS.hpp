@@ -155,17 +155,16 @@ TEST_CASE("main test")
   REQUIRE(e->velocity()->dx == 2);
   REQUIRE(e->velocity()->dy == 2);
 
-  // Node::updatePosition();
+  Node::updatePosition();
 
-  // REQUIRE(a->position()->x == 2);
-  // REQUIRE(a->position()->y == 3);
-  // REQUIRE(b->position()->x == 4);
-  // REQUIRE(b->position()->y == 5);
-  // REQUIRE(c->position()->x == 6);
-  // REQUIRE(c->position()->y == 7);
-  // REQUIRE(d->position()->x == 8);
-  // REQUIRE(d->position()->y == 9);
-  // REQUIRE(e->position()->x == 10);
-  // REQUIRE(e->position()->y == 11);
-
+  REQUIRE(a->position()->x == 3);
+  REQUIRE(a->position()->y == 4);
+  REQUIRE(b->position()->x == 5);
+  REQUIRE(b->position()->y == 6);
+  REQUIRE(c->position()->x == 7);
+  REQUIRE(c->position()->y == 8);
+  REQUIRE(d->position()->x == 9);
+  REQUIRE(d->position()->y == 10);
+  REQUIRE(e->position()->x == 11);
+  REQUIRE(e->position()->y == 12);
 }

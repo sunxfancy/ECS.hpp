@@ -1,18 +1,65 @@
-ECS.hpp - Class enabled Entity/Component System
-===============================================
+# ECS.hpp
 
-ECS.hpp is a header-only, class enabled entity/component system which provided a inheritence between different entity classes. 
-Currently, it is in development and is not ready for production use.
+Header-only, class-enabled Entity/Component System for C++17.
+
+Entities are ordinary C++ classes. Components are plain structs accessed through generated accessors. Inheritance between entity classes is first-class: a `View` over a base type also visits subclasses in the same world (`Table`).
+
+> Status: **in development** — API is usable for experiments and tests, not yet production-hardened.
 
 ## Features
 
-1. Native C++ Class support for Entities and Components
-2. Entity/Component System
+- Native C++ entity classes with `ENTITY` / `COMPONENT` macros
+- Multi-world isolation via `ecs::Table` (scene / level worlds)
+- Thread-local current table (`ScopedTable`, `set_current`)
+- Inheritance-aware `View` iteration (base query includes subclasses)
+- Defer / commit command buffer for safe create/destroy during iteration
+- `EntityHandle` + generation protocol for ABA-safe references
+- Header-only: `#include "ECS.hpp"`
 
-## Basic Usage Example
+## Requirements
 
-Assuming we have a `Node` class which has a `Position` component and a `Movable` class which inherits from `Node` and has a `Velocity` component.
-We can define the classes as follows:
+- C++17 compiler (GCC, Clang, or MSVC)
+- CMake ≥ 3.20 (for the test suite)
+- No external runtime dependencies
+
+## Build & Test
+
+```bash
+# Prefer Clang or MSVC for the test suite (zeroerr + GCC has pragma issues).
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=clang++
+cmake --build build -j
+./build/ecs_test
+# or: ctest --test-dir build --output-on-failure
+```
+
+On Windows (MSVC):
+
+```powershell
+cmake -S . -B build
+cmake --build build --config Debug
+.\build\Debug\ecs_test.exe
+# or: ctest --test-dir build -C Debug --output-on-failure
+```
+
+### Continuous Integration
+
+GitHub Actions runs the suite on every push/PR (`.github/workflows/ci.yml`):
+
+- Ubuntu + Clang (Debug & Release)
+- Windows + MSVC (Debug)
+- macOS + AppleClang (Debug)
+
+The test binary links several translation units under `test/`:
+
+| File | Coverage |
+| --- | --- |
+| `main.cpp` | Smoke / regression for Node–Sprite hierarchy |
+| `table_world.cpp` | Multi-table isolation and current context |
+| `defer_commit.cpp` | Defer, staging, destroy, nested Views |
+| `handles.cpp` | `EntityHandle`, freelist, visibility helpers |
+| `view_systems.cpp` | Multi-component Views, deep inheritance, systems |
+
+## Quick Start
 
 ```cpp
 #include "ECS.hpp"
@@ -22,79 +69,144 @@ class Node : public ecs::Entity
 public:
   ENTITY(Node, ecs::Entity)
 
-  struct Position
-  {
-    float x, y;
-  };
+  void release() override { ecs::DestroyEntity(this); }
+
+  struct Position { float x = 0, y = 0; };
   COMPONENT(Position, position)
 };
 
 class Movable : public Node
 {
 public:
-  ENTITY(Movable, Node)  // Inherit from Node
+  ENTITY(Movable, Node)
 
-  struct Velocity
-  {
-    float dx = 1;
-    float dy = 1;
-  };
+  struct Velocity { float dx = 1, dy = 1; };
   COMPONENT(Velocity, velocity)
 };
-```
-
-The `ENTITY` and `COMPONENT` macros are used to define the entity and component classes respectively. The first argument to the `ENTITY` macro is the class name and the second argument is the base class. The `COMPONENT` macro takes the component name and the member variable name as arguments.
-
-We can now create instances of the `Node` and `Movable` classes and access their components as follows:
-
-```cpp
 
 int main()
 {
-    Node *a = Node::create();
-    Movable *b = Movable::create();
+  Node *a = Node::create();
+  Movable *b = Movable::create();
 
-    a->position().x = 10;
-    a->position().y = 0;
+  a->position()->x = 10;
+  b->position()->y = 10;
+  b->velocity()->dx = 2;
 
-    b->position().x = 0;
-    b->position().y = 10;
-    b->velocity().dx = 2;
-    b->velocity().dy = 2;
-    ...
+  for (auto [pos, vel] : ecs::View<Node, Node::Position, Movable::Velocity>())
+  {
+    pos->x += vel->dx;
+    pos->y += vel->dy;
+  }
 }
 ```
 
-The component macros will create the necessary boilerplate code to access the components of the entities. The `create` method is used to create instances of the entities.
+Macros:
 
-Entities live in a `Table` (world). `Node::create()` writes to the thread-local current table (`ecs::default_table()` by default). You can also pass a table explicitly, or bind one with `ecs::ScopedTable` / `ecs::set_current`.
+- `ENTITY(T, BASE)` — declares `super`, `getComponentManager()`, and `create()` / `create(Table&)`.
+- `COMPONENT(T, name)` — generates `name()` returning `ecs::ComponentRef<T>`.
+
+## Concepts
+
+### Table (world)
+
+A `Table` owns all entity registries and component buffers for one world. Different tables never share entity ids or storage.
 
 ```cpp
 ecs::Table level;
 {
   ecs::ScopedTable guard(level);
-  Node *a = Node::create();                 // into level
-  auto view = ecs::View<Node, Node::Position>();  // current table
+  Node *a = Node::create();                          // into level
+  auto view = ecs::View<Node, Node::Position>();     // current table
 }
-Node *b = Node::create(level);              // explicit
+Node *b = Node::create(level);                       // explicit
 auto view = ecs::View<Node, Node::Position>(level);
 ```
 
-If you want handle all the entities under a class, you can use the View class to iterate all the entities under the class and its subclasses.
+| API | Meaning |
+| --- | --- |
+| `ecs::default_table()` | Process-wide fallback world |
+| `ecs::current()` | Thread-local current table (or default) |
+| `ecs::set_current(t)` | Bind current; `nullptr` → default |
+| `ecs::ScopedTable` | RAII save/restore of current |
+
+### View
+
+`View<Base, Comp...>` iterates live (non-dead, non-staging) entities of `Base` **and its subclasses** inside one table, zipping the requested component buffers.
 
 ```cpp
-    auto view = ecs::View<Node, Position>();
-
-    // This loop will iterate Node and Movable entities
-    for (auto it = view.begin(); it != view.end(); ++it)
-    {
-        auto [v] = *it;
-        v->x = 0;
-        v->y = 0;
-    }
+// Visits Node and Movable entities that have Position (+ Velocity if listed)
+for (auto [pos, vel] : ecs::View<Node, Node::Position, Movable::Velocity>(level))
+{
+  pos->x += vel->dx;
+}
 ```
 
+Constructing a `View` begins a defer scope; destroying it ends the scope and commits when the outermost defer depth hits zero. Keep the `View` object alive for the whole loop.
 
+### Defer / Commit
+
+Structural mutations (create / destroy) during iteration are buffered:
+
+| State | Create | Destroy | View sees |
+| --- | --- | --- | --- |
+| Not deferred | Immediate (main storage) | Immediate reclaim | Latest main |
+| Deferred | Staging (hidden from View) | Tombstone + queued reclaim | Main only |
+| After commit | Staging published | Slot on freelist | Updated main |
+
+```cpp
+ecs::Table table;
+{
+  ecs::ScopedDefer guard(table);
+  auto *e = Node::create(table);   // staging
+  e->position()->x = 42;           // writable now
+}                                  // auto-commit
+```
+
+Also available: `begin_defer` / `end_defer` / `commit`, each with current-table and `Table&` overloads.
+
+### Handles & lifetime
+
+Raw pointers into staging become invalid after commit. Prefer handles across defer boundaries:
+
+```cpp
+auto h = ecs::handle_of(entity);
+ecs::DestroyEntity(entity);
+REQUIRE(ecs::try_get(h) == nullptr);   // generation mismatch / dead
+```
+
+`DestroyEntity(nullptr)` and double-destroy are no-ops. Destroy bumps `generation` and marks `kEntityDead`; freelist reuse resets component slots and keeps a new generation.
+
+### Inheritance
+
+Parent/child buffer links are **within one Table**. `View<Node>` in table A never sees entities from table B, but does see `Sprite` / deeper subclasses that live in A.
+
+## Documentation
+
+| Document | Content |
+| --- | --- |
+| [docs/API.md](docs/API.md) | Public API reference |
+| [docs/guide.md](docs/guide.md) | Usage guide, patterns, pitfalls |
+| [docs/testing.md](docs/testing.md) | How the test suite is organized |
+| [Table world design](docs/superpowers/specs/2026-08-07-table-world-design.md) | Multi-world design spec |
+| [Defer/commit design](docs/superpowers/specs/2026-08-07-defer-commit-design.md) | Command buffer design spec |
+
+## Project Layout
+
+```
+src/ECS.hpp                 # library (header-only)
+test/                       # zeroerr-based suite + viz helpers
+docs/                       # guides + design specs
+CMakeLists.txt              # builds ecs_test
+```
+
+## Non-goals (current)
+
+- Moving entities between Tables
+- Cross-table Views
+- Serialization / persistence
+- Multi-threaded commit
+- Command-buffering component add/remove
 
 ## License
 
