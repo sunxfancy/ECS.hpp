@@ -6,9 +6,11 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <tuple>
 #include <type_traits>
 #include <typeindex>
+#include <utility>
 #include <vector>
 
 #define COMPONENT(T, name) \
@@ -17,14 +19,27 @@
 #define OPTIONAL_COMPONENT(T, name) \
   ecs::OptionalComponentRef<T> name() { return ecs::OptionalComponentRef<T>(this); }
 
-#define ENTITY(T, BASE)                                       \
-  using super = BASE;                                         \
+// Both create() forms are templates so that they are instantiated only when
+// called. A non-template create() would be compiled for every entity type
+// eagerly, which would require every entity type to be default constructible
+// even when it is only ever created with constructor arguments.
+#define ENTITY(T, BASE)                                        \
+  using super = BASE;                                          \
   ecs::IComponentManager &getComponentManager() const override \
-  {                                                           \
-    return *storage;                                          \
-  }                                                           \
-  static T *create() { return ecs::CreateEntity<T>(); }        \
-  static T *create(ecs::Table &tbl) { return ecs::CreateEntity<T>(tbl); }
+  {                                                            \
+    return *storage;                                           \
+  }                                                            \
+  template <class... Args>                                      \
+  static T *create(Args &&...args)                              \
+  {                                                            \
+    return ecs::CreateEntity<T>(std::forward<Args>(args)...);   \
+  }                                                            \
+  template <class... Args>                                      \
+  static T *create(ecs::Table &tbl, Args &&...args)             \
+  {                                                            \
+    return ecs::CreateEntity<T>(tbl, false,                    \
+                                std::forward<Args>(args)...);   \
+  }
 
 namespace ecs
 {
@@ -242,22 +257,45 @@ namespace ecs
   /**
    * @brief IComponentBuffer 是一个抽象类，用于表示一个存储 Component 数据的容器
    */
+  /**
+   * @brief What every buffer in a Table shares: identity, size and the
+   *        base/derived buffer links used by View recursion.
+   *
+   * Carries no operation typed on the stored value. A buffer that only ever
+   * holds entity records must not be forced to instantiate value-slot
+   * operations it never performs: a virtual of a class template is
+   * instantiated whenever the class is, so a value-typed virtual here would
+   * impose its type requirements on every buffer, including the entity root.
+   */
   class IComponentBuffer
   {
   public:
     virtual ~IComponentBuffer() = default;
-    virtual uint32_t add() = 0;
-    virtual void ensure_space(uint32_t) = 0;
     virtual uint32_t size() const = 0;
     virtual const std::type_info &getType() const = 0;
-    virtual void copy_slot(uint32_t from_id, uint32_t to_id,
-                           IComponentBuffer *from) = 0;
-    virtual IComponentBuffer *ensure_equivalent(IComponentManager *dst_cm) = 0;
-    virtual void reset_slot(uint32_t id) = 0;
 
     IComponentManager *manager = nullptr;
     IComponentBuffer *parent = nullptr;
     IComponentBuffer *children = nullptr, *next = nullptr;
+  };
+
+  /**
+   * @brief Value-slot operations, valid only for a buffer that stores an
+   *        attached component.
+   *
+   * These are the operations that create, overwrite or transfer a stored
+   * value, so only a component buffer implements them. Keeping them off
+   * IComponentBuffer is what lets an entity record be move-only and
+   * non-default-constructible.
+   */
+  class IComponentSlotBuffer : public IComponentBuffer
+  {
+  public:
+    virtual void ensure_space(uint32_t) = 0;
+    virtual void transfer_slot(uint32_t from_id, uint32_t to_id,
+                               IComponentSlotBuffer *from) = 0;
+    virtual IComponentSlotBuffer *ensure_equivalent(IComponentManager *dst_cm) = 0;
+    virtual void reset_slot(uint32_t id) = 0;
   };
 
   class IEntityIterator
@@ -292,7 +330,7 @@ namespace ecs
     bool staging = false;
 
     IComponentBuffer *registy = nullptr;
-    std::map<std::type_index, IComponentBuffer *> components;
+    std::map<std::type_index, IComponentSlotBuffer *> components;
 
     virtual ~IComponentManager() = default;
     virtual const std::type_info &getType() const = 0;
@@ -389,8 +427,10 @@ namespace ecs
           continue;
 
         uint32_t preserved_gen = se->generation ? se->generation : 1;
-        uint32_t mid = m_reg->add();
-        m_reg->container[mid] = std::move(s_reg->container[sid]);
+        // Construct the record in place from the staging value. The staging
+        // buffers are destroyed immediately after publish_staging() returns,
+        // so moving is both safe and the only requirement placed on B.
+        uint32_t mid = m_reg->emplace(std::move(s_reg->container[sid]));
         B &me = m_reg->container[mid];
         me.id = mid;
         me.flags &= ~(kEntityStaging | kEntityDead);
@@ -401,8 +441,8 @@ namespace ecs
         for (auto &[key, s_buf] : staging_cm->components)
         {
           (void)key;
-          IComponentBuffer *m_buf = s_buf->ensure_equivalent(this);
-          m_buf->copy_slot(sid, mid, s_buf);
+          IComponentSlotBuffer *m_buf = s_buf->ensure_equivalent(this);
+          m_buf->transfer_slot(sid, mid, s_buf);
         }
       }
     }
@@ -415,59 +455,161 @@ namespace ecs
     }
   };
 
+  /**
+   * @brief Raw, correctly aligned storage for one T.
+   *
+   * sizeof(SlotStorage<T>) == sizeof(T) for every well formed T, so a container
+   * of these has exactly the layout of a container of T. Presence is tracked
+   * out of band by CommonComponentBuffer's bitmap, the same way std::vector
+   * tracks a constructed prefix with a size counter instead of a per element
+   * flag. A tag stored next to each value (as std::optional does) would add
+   * sizeof(T) rounded up to alignof(T) per slot -- 50% for an 8 byte component
+   * and 100% for a float -- on the arrays a View walks every frame.
+   */
   template <typename T>
-  class CommonComponentBuffer : public IComponentBuffer
-  {
-  public:
-    std::deque<T> container;
+  struct SlotStorage {
+    alignas(T) unsigned char bytes[sizeof(T)];
+  };
 
+  /**
+   * @brief Slot storage for an attached component.
+   *
+   * "The slot exists" and "a value is alive in it" are two separate facts: the
+   * slot array holds raw storage, and a bitmap records which slots hold a live
+   * value. That is the split std::vector makes between capacity and size, and
+   * it is what lets the storage level avoid constructing a value nobody asked
+   * for: growing the slot array, discarding a slot and transferring a slot all
+   * touch only raw storage and the bitmap, so they require nothing of T beyond
+   * move-constructibility and destructibility.
+   *
+   * The operations that DO construct a value (get(), emplace(), engageUpTo())
+   * require T to be constructible for that particular call. They are ordinary
+   * members, not virtuals, so they are instantiated only for component types
+   * that actually use them: a component always constructed explicitly from
+   * arguments never needs a default constructor.
+   */
+  template <typename T>
+  class CommonComponentBuffer : public IComponentSlotBuffer
+  {
+    // The whole point of tracking presence out of band: a component buffer must
+    // keep the exact layout it had when it stored T directly. If this ever
+    // fires, per-slot overhead has crept back into the arrays a View walks.
+    static_assert(sizeof(SlotStorage<T>) == sizeof(T),
+                  "component slot storage must not change the component layout");
+
+  public:
+    std::deque<SlotStorage<T>> container;
+
+    /** @brief Whether slot @p id currently holds a live value. */
+    bool has(uint32_t id) const
+    {
+      const size_t word = static_cast<size_t>(id) >> 6;
+      return id < container.size() && word < live_.size() &&
+             ((live_[word] >> (id & 63u)) & 1ull) != 0;
+    }
+
+    /**
+     * @brief Constructs a value in slot @p id when none is alive.
+     * @param args Forwarded to T's constructor.
+     * @return True when this call constructed the value.
+     */
+    template <typename... Args>
+    bool emplace(uint32_t id, Args &&...args)
+    {
+      if (id >= container.size())
+        container.resize(id + 1);
+      if (has(id))
+        return false;
+      ::new (static_cast<void *>(container[id].bytes)) T(std::forward<Args>(args)...);
+      mark(id);
+      return true;
+    }
+
+    /** @brief Borrows the live value in slot @p id; the caller proved existence. */
+    T &at(uint32_t id) { return *std::launder(reinterpret_cast<T *>(container[id].bytes)); }
+    const T &at(uint32_t id) const
+    {
+      return *std::launder(reinterpret_cast<const T *>(container[id].bytes));
+    }
+
+    /** @brief Typed pointer to slot @p id's raw storage. */
+    T *ptr(uint32_t id) { return std::launder(reinterpret_cast<T *>(container[id].bytes)); }
+
+    /**
+     * @brief Borrows slot @p id, constructing a value there when it is empty.
+     * @remarks This is the operation that requires T to be default
+     *          constructible, and only for component types whose accessor is
+     *          actually used this way.
+     */
     T &get(uint32_t id)
     {
       if (id >= container.size())
         container.resize(id + 1);
-      return container.at(id);
-    }
-
-    const T &get(uint32_t id) const
-    {
-      if (id >= container.size())
-        container.resize(id + 1);
-      return container.at(id);
-    }
-
-    uint32_t add() override
-    {
-      uint32_t id = static_cast<uint32_t>(container.size());
-      container.push_back(T{});
-      return id;
+      if (!has(id))
+      {
+        ::new (static_cast<void *>(container[id].bytes)) T();
+        mark(id);
+      }
+      return at(id);
     }
 
     uint32_t size() const override { return static_cast<uint32_t>(container.size()); }
 
     const std::type_info &getType() const override { return typeid(T); }
 
+    /**
+     * @brief Grows the slot array to @p new_size, leaving the new slots empty.
+     * @remarks Constructs no value, so this requires nothing of T.
+     */
     void ensure_space(uint32_t new_size) override
     {
       if (new_size > container.size())
         container.resize(new_size);
     }
 
-    void copy_slot(uint32_t from_id, uint32_t to_id,
-                   IComponentBuffer *from) override
+    /**
+     * @brief Moves one component slot from a staging buffer into this buffer.
+     *
+     * Move, not copy: the only caller is publish_from(), which runs immediately
+     * before the staging buffers are destroyed, so the source value is dead
+     * either way. Move construction is the only operation required of T.
+     */
+    void transfer_slot(uint32_t from_id, uint32_t to_id,
+                       IComponentSlotBuffer *from) override
     {
       auto *fb = dynamic_cast<CommonComponentBuffer<T> *>(from);
-      get(to_id) = fb->get(from_id);
+      if (to_id >= container.size())
+        container.resize(to_id + 1);
+      if (has(to_id))
+      {
+        std::destroy_at(ptr(to_id));
+        unmark(to_id);
+      }
+      if (fb->has(from_id))
+      {
+        ::new (static_cast<void *>(container[to_id].bytes)) T(std::move(*fb->ptr(from_id)));
+        mark(to_id);
+        std::destroy_at(fb->ptr(from_id));
+        fb->unmark(from_id);
+      }
     }
 
-    IComponentBuffer *ensure_equivalent(IComponentManager *dst_cm) override
+    IComponentSlotBuffer *ensure_equivalent(IComponentManager *dst_cm) override
     {
       return dst_cm->template getOrCreateComponentBuffer<T>();
     }
 
+    /**
+     * @brief Discards the value in slot @p id.
+     * @remarks Destroys instead of reassigning, so no value is constructed and
+     *          nothing is required of T.
+     */
     void reset_slot(uint32_t id) override
     {
-      if (id < container.size())
-        container[id] = T{};
+      if (!has(id))
+        return;
+      std::destroy_at(ptr(id));
+      unmark(id);
     }
 
     CommonComponentBuffer(IComponentManager *cm, IComponentBuffer *pcb)
@@ -489,6 +631,28 @@ namespace ecs
         parent = pcb;
       }
     }
+
+  private:
+    void ensureWord(uint32_t id)
+    {
+      const size_t word = (static_cast<size_t>(id) >> 6) + 1;
+      if (word > live_.size())
+        live_.resize(word, 0);
+    }
+    void mark(uint32_t id)
+    {
+      ensureWord(id);
+      live_[static_cast<size_t>(id) >> 6] |= (1ull << (id & 63u));
+    }
+    void unmark(uint32_t id)
+    {
+      const size_t word = static_cast<size_t>(id) >> 6;
+      if (word < live_.size())
+        live_[word] &= ~(1ull << (id & 63u));
+    }
+
+    /** @brief One bit per slot: the out of band record of which slots are alive. */
+    std::vector<uint64_t> live_;
   };
 
   template <typename T>
@@ -497,6 +661,24 @@ namespace ecs
   public:
     ComponentBuffer(IComponentManager *cm, IComponentBuffer *pcb)
         : CommonComponentBuffer<T>(cm, pcb) {}
+
+    /**
+     * @brief Grows to @p new_size and gives every slot a value.
+     * @remarks This is where "every live entity has this component" is
+     *          materialised, so it is the operation that requires T to be
+     *          default constructible. It is not virtual, so it is instantiated
+     *          only for the component types a View or accessor actually asks
+     *          for; a component always constructed from arguments never
+     *          instantiates it.
+     */
+    void engageUpTo(uint32_t new_size)
+    {
+      if (new_size > this->container.size())
+        this->container.resize(new_size);
+      for (uint32_t id = 0; id < new_size; ++id)
+        if (!this->has(id))
+          this->emplace(id);
+    }
 
     BufferIterator<T> begin() { return BufferIterator<T>(this); }
     BufferIterator<T> end() { return BufferIterator<T>(); }
@@ -532,35 +714,79 @@ namespace ecs
     Entity &operator*() override { return *it; }
   };
 
+  /**
+   * @brief Slot storage for entity records of type T (the entity root).
+   *
+   * Deliberately does NOT derive from CommonComponentBuffer. That class
+   * implements the value-slot virtuals, and a virtual of a class template is
+   * instantiated whenever the class is, so inheriting from it would require T
+   * to be default-constructible and copy-assignable even though an entity
+   * record is never used as a component. Here T only has to be constructible
+   * from the arguments create() forwards, and destructible.
+   */
   template <typename T>
-  class RegistryComponentBuffer : public CommonComponentBuffer<T>,
+  class RegistryComponentBuffer : public IComponentBuffer,
                                   public IRegistryComponentBuffer
   {
   public:
+    std::deque<T> container;
     std::vector<uint32_t> freelist_;
 
     RegistryComponentBuffer(IComponentManager *cm, IComponentBuffer *pcb)
-        : CommonComponentBuffer<T>(cm, pcb) {}
+    {
+      manager = cm;
 
-    uint32_t add() override
+      if (cm->parent != nullptr)
+      {
+        if (pcb == nullptr)
+          return;
+        if (pcb->children == nullptr)
+          pcb->children = this;
+        else
+        {
+          IComponentBuffer *old_head = pcb->children;
+          pcb->children = this;
+          this->next = old_head;
+        }
+        parent = pcb;
+      }
+    }
+
+    /**
+     * @brief Constructs one entity record in a fresh or recycled slot.
+     * @param args Forwarded to T's constructor; no argument means T().
+     * @return The slot id the new record occupies.
+     * @remarks A recycled slot keeps the retired incarnation's generation so
+     *          handles to it stay stale.
+     */
+    template <typename... Args>
+    uint32_t emplace(Args &&...args)
     {
       if (!freelist_.empty())
       {
         uint32_t id = freelist_.back();
         freelist_.pop_back();
-        uint32_t preserved_gen = this->container[id].generation;
-        this->container[id] = T{};
-        this->container[id].generation = preserved_gen;
+        T &slot = container[id];
+        const uint32_t preserved_gen = slot.generation;
+        slot.~T();
+        new (&slot) T(std::forward<Args>(args)...);
+        slot.generation = preserved_gen;
         return id;
       }
-      return CommonComponentBuffer<T>::add();
+      container.emplace_back(std::forward<Args>(args)...);
+      return static_cast<uint32_t>(container.size() - 1);
     }
 
+    uint32_t size() const override { return static_cast<uint32_t>(container.size()); }
+
+    const std::type_info &getType() const override { return typeid(T); }
+
+    /** @brief Returns the record at @p id, or nullptr; never creates a slot. */
     Entity *getEntity(uint32_t id) override
     {
-      if (id >= this->container.size())
-        this->container.resize(id + 1);
-      return &this->container.at(id);
+      if (id >= container.size())
+        return nullptr;
+      return &container[id];
     }
 
     IEntityIteratorPtr beginEntity() override
@@ -613,8 +839,53 @@ namespace ecs
 
     IComponentManager &CM() const { return entity->getComponentManager(); }
 
-    T &operator*() const { return getBuffer(CM())->get(entity->id); }
-    T *operator->() const { return &(getBuffer(CM())->get(entity->id)); }
+    /**
+     * @brief Borrows this entity's component.
+     *
+     * For a default-constructible component this is the convenience it has
+     * always been: an empty slot is given a value on first touch. For a
+     * component without a default constructor there is nothing to conjure, so
+     * the accessor only ever observes: use emplace() to construct it first.
+     * @remarks The if-constexpr keeps get() from being instantiated for a type
+     *          that cannot satisfy it.
+     */
+    T &operator*() const
+    {
+      auto *buf = getBuffer(CM());
+      if constexpr (std::is_default_constructible_v<T>)
+        return buf->get(entity->id);
+      else
+        return buf->at(entity->id);
+    }
+
+    /** @brief Pointer to this entity's component; nullptr when it has none. */
+    T *operator->() const
+    {
+      auto *buf = getBuffer(CM());
+      if constexpr (std::is_default_constructible_v<T>)
+        return &buf->get(entity->id);
+      else
+        return buf->has(entity->id) ? buf->ptr(entity->id) : nullptr;
+    }
+
+    /**
+     * @brief Constructs this entity's component in place from @p args.
+     * @return The component, whether it was just constructed or already alive.
+     * @remarks This is the explicit-construction path. It is what a component
+     *          without a default constructor uses: operator*() is only the
+     *          convenience that materialises a default value, and it is never
+     *          instantiated for a type that does not use it.
+     */
+    template <typename... Args>
+    T &emplace(Args &&...args) const
+    {
+      auto *buf = getBuffer(CM());
+      buf->emplace(entity->id, std::forward<Args>(args)...);
+      return buf->at(entity->id);
+    }
+
+    /** @brief Whether this entity currently holds a value for the component. */
+    bool has() const { return getBuffer(CM())->has(entity->id); }
 
     static ComponentBuffer<T> *getBuffer(IComponentManager &cm)
     {
@@ -686,8 +957,20 @@ namespace ecs
     staging_managers_.clear();
   }
 
-  template <typename T>
-  T *CreateEntity(Table &table, bool force_main = false)
+  /**
+   * @brief Creates one entity record of type T, forwarding constructor
+   *        arguments to it.
+   *
+   * @param table Owning table.
+   * @param force_main When true, bypasses staging and publishes immediately.
+   * @param args Forwarded to T's constructor; no argument means T().
+   * @return The new record, owned by @p table.
+   * @remarks T only has to be constructible from @p args and destructible. A
+   *          record is never copied, and is only default constructed when the
+   *          caller passes no arguments.
+   */
+  template <typename T, typename... Args>
+  T *CreateEntity(Table &table, bool force_main, Args &&...args)
   {
     const bool use_staging = table.is_deferred() && !force_main;
 
@@ -698,8 +981,8 @@ namespace ecs
                                       table.template getOrCreateManager<T>());
 
     auto *registry = cm.template getOrCreateRegistryComponentBuffer<T>();
-    uint32_t id = registry->add();
-    T &inst = registry->get(id);
+    uint32_t id = registry->emplace(std::forward<Args>(args)...);
+    T &inst = registry->container[id];
     inst.id = id;
     inst.table = &table;
     inst.storage = &cm;
@@ -717,10 +1000,16 @@ namespace ecs
     return &inst;
   }
 
-  template <typename T>
-  T *CreateEntity()
+  template <typename T, typename... Args>
+  T *CreateEntity(Table &table, Args &&...args)
   {
-    return CreateEntity<T>(*current());
+    return CreateEntity<T>(table, false, std::forward<Args>(args)...);
+  }
+
+  template <typename T, typename... Args>
+  T *CreateEntity(Args &&...args)
+  {
+    return CreateEntity<T>(*current(), false, std::forward<Args>(args)...);
   }
 
   inline void DestroyEntity(Entity *e)
@@ -820,8 +1109,24 @@ namespace ecs
 
     bool operator!=(const BufferIterator &other) const { return !(*this == other); }
 
-    T *operator->() { return cb ? &*it : nullptr; }
-    T &operator*() { return *it; }
+    /** @brief Slot index this iterator currently addresses. */
+    uint32_t index() const { return static_cast<uint32_t>(it - cb->container.begin()); }
+
+    /**
+     * @brief Whether the current slot holds a value.
+     * @remarks Liveness lives in the buffer's bitmap rather than in the slot,
+     *          so it is queried by index. Slots stay index-locked across a
+     *          View's buffers, so an empty slot is a legitimate state here
+     *          rather than something to skip: the zip would desynchronise if
+     *          one buffer advanced and another did not.
+     */
+    bool hasValue() const
+    {
+      return cb != nullptr && it != cb->container.end() && cb->has(index());
+    }
+
+    T *operator->() { return hasValue() ? cb->ptr(index()) : nullptr; }
+    T &operator*() { return cb->at(index()); }
 
     CBType *buffer() const { return cb; }
 
@@ -869,7 +1174,7 @@ namespace ecs
     }
 
     CBType *cb = nullptr;
-    typename std::deque<T>::iterator it;
+    typename std::deque<SlotStorage<std::remove_const_t<T>>>::iterator it;
   };
 
   template <typename T>
@@ -1036,9 +1341,14 @@ namespace ecs
       (BufferIterator<Ts>::operator++(), ...);
     }
 
+    bool current_components_present() const
+    {
+      return (BufferIterator<Ts>::hasValue() && ...);
+    }
+
     void advance_if_invalid()
     {
-      while (!at_end() && !current_entity_visible())
+      while (!at_end() && !(current_entity_visible() && current_components_present()))
         step_all();
     }
   };
@@ -1064,17 +1374,34 @@ namespace ecs
     View(const View &) = delete;
     View &operator=(const View &) = delete;
 
+    /**
+     * @brief Gives this View's component slots a value for the first @p n ids.
+     *
+     * The established behaviour is that every live entity has the components a
+     * View names, so the slots are engaged here. Engaging needs only the
+     * default constructor of the component types a View actually names, and is
+     * skipped for a type that has none: such a component then stays present
+     * only where it was constructed explicitly, and the View yields exactly
+     * those entities.
+     */
+    template <typename C>
+    static void engageSlots(ComponentBuffer<C> *cb, uint32_t n)
+    {
+      if (cb == nullptr)
+        return;
+      cb->ensure_space(n);
+      if constexpr (std::is_default_constructible_v<C>)
+        cb->engageUpTo(n);
+    }
+
     void ensure_space(IComponentBuffer *cur)
     {
       IComponentManager *cm = cur->manager;
-      std::vector<IComponentBuffer *> cbs = {
-          cm->template getOrCreateComponentBuffer<std::remove_const_t<Ts>>()...};
-
-      for (auto cb : cbs)
-      {
-        if (cb != nullptr)
-          cb->ensure_space(cur->size());
-      }
+      const uint32_t n = cur->size();
+      (void)std::initializer_list<int>{
+          (engageSlots<std::remove_const_t<Ts>>(
+               cm->template getOrCreateComponentBuffer<std::remove_const_t<Ts>>(), n),
+           0)...};
 
       if (cur->children != nullptr)
         ensure_space(cur->children);
