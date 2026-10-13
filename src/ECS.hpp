@@ -931,8 +931,29 @@ namespace ecs
 
   inline void Table::publish_staging()
   {
+    // Deferred creates are reserved directly in main storage with kEntityStaging.
+    // Commit promotes them in place so EntityHandle id/generation stay stable.
+    for (auto &[type, cm] : managers_)
+    {
+      (void)type;
+      if (cm == nullptr || cm->registy == nullptr)
+        continue;
+      auto *reg = dynamic_cast<IRegistryComponentBuffer *>(cm->registy);
+      if (reg == nullptr)
+        continue;
+      for (uint32_t id = 0; id < reg->entity_count(); ++id)
+      {
+        Entity *e = reg->entity_at(id);
+        if (e == nullptr || (e->flags & kEntityDead) != 0)
+          continue;
+        e->flags &= ~kEntityStaging;
+      }
+    }
+
+    // Legacy path: move any records still sitting in staging_managers_.
     for (auto &[type, staging_cm] : staging_managers_)
     {
+      (void)type;
       IComponentManager *main_cm = staging_cm->ensure_main_manager(this);
       main_cm->publish_from(staging_cm);
     }
@@ -962,7 +983,7 @@ namespace ecs
    *        arguments to it.
    *
    * @param table Owning table.
-   * @param force_main When true, bypasses staging and publishes immediately.
+   * @param force_main When true, creates a visible main entity even while deferred.
    * @param args Forwarded to T's constructor; no argument means T().
    * @return The new record, owned by @p table.
    * @remarks T only has to be constructible from @p args and destructible. A
@@ -972,13 +993,13 @@ namespace ecs
   template <typename T, typename... Args>
   T *CreateEntity(Table &table, bool force_main, Args &&...args)
   {
-    const bool use_staging = table.is_deferred() && !force_main;
+    // Deferred creates reserve a slot in main storage and mark it staging so
+    // Views skip it until commit. That keeps EntityHandle identity stable and
+    // avoids a second registry that would require default-constructible holes.
+    const bool mark_staging = table.is_deferred() && !force_main;
 
-    IComponentManager &cm = use_staging
-                                ? static_cast<IComponentManager &>(
-                                      table.template getOrCreateStagingManager<T>())
-                                : static_cast<IComponentManager &>(
-                                      table.template getOrCreateManager<T>());
+    IComponentManager &cm =
+        static_cast<IComponentManager &>(table.template getOrCreateManager<T>());
 
     auto *registry = cm.template getOrCreateRegistryComponentBuffer<T>();
     uint32_t id = registry->emplace(std::forward<Args>(args)...);
@@ -986,7 +1007,7 @@ namespace ecs
     inst.id = id;
     inst.table = &table;
     inst.storage = &cm;
-    if (use_staging)
+    if (mark_staging)
       inst.flags |= kEntityStaging;
     if (inst.generation == 0)
       inst.generation = 1;
@@ -1023,15 +1044,13 @@ namespace ecs
     e->flags |= kEntityDead;
 
     Table *table = e->table;
-    const bool is_staging = (e->flags & kEntityStaging) != 0;
 
     if (table->is_deferred())
     {
-      if (!is_staging)
-      {
-        table->pending_destroys_.push_back(
-            {e->getComponentManager().getType(), e->id, e->generation, false});
-      }
+      // Staging-flagged deferred creates live in main storage, so they use the
+      // same pending reclaim path as ordinary destroys.
+      table->pending_destroys_.push_back(
+          {e->getComponentManager().getType(), e->id, e->generation, false});
     }
     else
     {
@@ -1074,6 +1093,7 @@ namespace ecs
       return nullptr;
     if (e->flags & kEntityDead)
       return nullptr;
+    // Staging-flagged deferred creates are valid handle targets before commit.
 
     return e;
   }
@@ -1317,9 +1337,30 @@ namespace ecs
 
     bool operator!=(const ViewIterator &other) const { return !(*this == other); }
 
+    /**
+     * @brief Borrowed pointer to the current entity record (base type B).
+     * @lifetime Valid until the owning Table mutates this slot (destroy / freelist reuse).
+     * @remarks Prefer this (or row()) over a second live-entity index when a system
+     *          needs identity for DestroyEntity, Links, or handles.
+     */
+    B *entity() const
+    {
+      return static_cast<B *>(RegistryBufferIterator<B>::entity());
+    }
+
+    /**
+     * @brief Component columns only (existing structured-binding shape).
+     * @remarks Use row() when the entity pointer is needed in the same binding.
+     */
     std::tuple<Ts *...> operator*()
     {
       return std::tuple<Ts *...>(BufferIterator<Ts>::operator->()...);
+    }
+
+    /** @brief Entity plus component columns: structured-bind as auto [e, a, b] = it.row(). */
+    std::tuple<B *, Ts *...> row()
+    {
+      return std::tuple<B *, Ts *...>(entity(), BufferIterator<Ts>::operator->()...);
     }
 
   private:

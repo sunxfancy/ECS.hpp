@@ -83,7 +83,7 @@ Each job configures with CMake, builds `ecs_test`, then runs `ctest --output-on-
 
 - Empty / wrong-table / wrong-type / OOB handles
 - Component slot reset on freelist reuse
-- Staging handle not remapped after publish (v1 contract)
+- Staging handle stays valid through publish (in-place main reservation)
 - `is_entity_visible`
 - No-arg `begin_defer` / `ScopedDefer` against current table
 

@@ -137,7 +137,7 @@ TEST_CASE("generation starts at 1 and bumps on destroy")
   REQUIRE(ecs::try_get(ecs::handle_of(reuse)) == reuse);
 }
 
-TEST_CASE("staging handle is not remapped through commit")
+TEST_CASE("staging handle stays valid through commit")
 {
   ecs::Table table;
   hd::Node *live = hd::Node::create(table);
@@ -151,16 +151,18 @@ TEST_CASE("staging handle is not remapped through commit")
     staged_ptr = hd::Node::create(table);
     staged_ptr->pos()->x = 11;
     staged_handle = ecs::handle_of(staged_ptr);
-    REQUIRE(staged_handle.id == live_handle.id);
-    // try_get only inspects main storage. Staging ids are local, so a colliding
-    // id/generation resolves to the live main entity — never the staging pointer.
-    REQUIRE(ecs::try_get(staged_handle) == live);
-    REQUIRE(ecs::try_get(staged_handle) != staged_ptr);
+    // Deferred create reserves a distinct main id and marks it staging.
+    REQUIRE(staged_handle.id != live_handle.id);
+    REQUIRE(ecs::try_get(staged_handle) == staged_ptr);
+    REQUIRE(ecs::try_get(live_handle) == live);
   }
 
-  // v1: commit does not rewrite staging ids onto the handle.
-  REQUIRE(ecs::try_get(staged_handle) == live);
+  // Commit promotes in place: same handle and pointer remain valid.
+  ecs::Entity *published = ecs::try_get(staged_handle);
+  REQUIRE(published == staged_ptr);
+  REQUIRE(published != live);
   REQUIRE(ecs::try_get(live_handle) == live);
+  REQUIRE(static_cast<hd::Node *>(published)->pos()->x == 11);
 
   int n = 0;
   int sum = 0;

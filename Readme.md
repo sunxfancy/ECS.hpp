@@ -14,6 +14,8 @@ Entities are ordinary C++ classes. Components are plain structs accessed through
 - Inheritance-aware `View` iteration (base query includes subclasses)
 - Defer / commit command buffer for safe create/destroy during iteration
 - `EntityHandle` + generation protocol for ABA-safe references
+- Stable staging handles: deferred create reserves main storage in place
+- `ViewIterator::entity()` / `row()` when systems need the entity record
 - Header-only: `#include "ECS.hpp"`
 
 ## Requirements

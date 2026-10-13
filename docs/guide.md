@@ -98,7 +98,18 @@ void apply_damage(ecs::Table &world)
 }
 ```
 
-Because `View` does not currently yield the `Entity*` in the tuple, hold entity pointers you create, or use handles, when you need to destroy from inside a system.
+`View` structured bindings still yield component pointers only (`operator*`). Use
+`it.entity()` or `it.row()` when a system needs the entity for `DestroyEntity`,
+Links, or handles:
+
+```cpp
+for (auto it = view.begin(); it != view.end(); ++it)
+{
+  auto [e, hp] = it.row(); // e is Unit*
+  if (hp->hp <= 0)
+    ecs::DestroyEntity(e);
+}
+```
 
 ## Safe create/destroy during iteration
 
@@ -152,8 +163,7 @@ if (ecs::Entity *e = ecs::try_get(target))
 
 Rules of thumb:
 
-- Do not store staging pointers past `commit`.
-- After a deferred create commits, re-acquire a handle from a View or from a pointer you know is in main storage.
+- Deferred creates reserve main storage in place: handles (and pointers) stay valid across `commit`.
 - Generation mismatch ⇒ treat as “entity gone”.
 
 ## Multi-world tips
@@ -180,8 +190,8 @@ Subclass-only worlds are fine: creating `Enemy` without ever calling `Unit::crea
 2. **Assuming ids are global**  
    Ids are per-table and reused via freelist.
 
-3. **Using staging handles after commit**  
-   v1 does not remap staging → main for `try_get`.
+3. **Assuming deferred creates are visible to Views before commit**  
+   Staging-flagged entities are skipped until publish.
 
 4. **Forgetting `release` / `DestroyEntity`**  
    Without destroy, slots are never reclaimed and Views keep seeing the entity.
