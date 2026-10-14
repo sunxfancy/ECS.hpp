@@ -1123,14 +1123,14 @@ namespace ecs
       if (cb == nullptr)
         return other.cb == nullptr;
       if (cb == other.cb)
-        return it == other.it;
+        return index_ == other.index_;
       return false;
     }
 
     bool operator!=(const BufferIterator &other) const { return !(*this == other); }
 
     /** @brief Slot index this iterator currently addresses. */
-    uint32_t index() const { return static_cast<uint32_t>(it - cb->container.begin()); }
+    uint32_t index() const { return index_; }
 
     /**
      * @brief Whether the current slot holds a value.
@@ -1142,11 +1142,11 @@ namespace ecs
      */
     bool hasValue() const
     {
-      return cb != nullptr && it != cb->container.end() && cb->has(index());
+      return cb != nullptr && !at_current_end() && cb->has(index_);
     }
 
-    T *operator->() { return hasValue() ? cb->ptr(index()) : nullptr; }
-    T &operator*() { return cb->at(index()); }
+    T *operator->() { return hasValue() ? cb->ptr(index_) : nullptr; }
+    T &operator*() { return cb->at(index_); }
 
     CBType *buffer() const { return cb; }
 
@@ -1156,18 +1156,25 @@ namespace ecs
     {
       if (cb == nullptr)
         return;
-      if (it != cb->container.end())
-        ++it;
-      while (cb != nullptr && it == cb->container.end())
+      if (!at_current_end())
+        ++index_;
+      while (cb != nullptr && at_current_end())
         hop();
     }
 
   private:
+    bool at_current_end() const
+    {
+      return cb == nullptr || index_ >= end_index_;
+    }
+
     void setCB(CBType *_cb)
     {
       cb = _cb;
-      if (cb != nullptr)
-        it = cb->container.begin();
+      index_ = 0;
+      // Snapshot size so deferred CreateEntity can grow the deque without
+      // invalidating this cursor or making mid-View creates visible.
+      end_index_ = (cb != nullptr) ? static_cast<uint32_t>(cb->container.size()) : 0;
     }
 
     void hop()
@@ -1194,7 +1201,8 @@ namespace ecs
     }
 
     CBType *cb = nullptr;
-    typename std::deque<SlotStorage<std::remove_const_t<T>>>::iterator it;
+    uint32_t index_ = 0;
+    uint32_t end_index_ = 0;
   };
 
   template <typename T>
@@ -1215,7 +1223,7 @@ namespace ecs
       if (cb == nullptr)
         return other.cb == nullptr;
       if (cb == other.cb)
-        return it == other.it;
+        return index_ == other.index_;
       return false;
     }
 
@@ -1226,28 +1234,26 @@ namespace ecs
 
     T *operator->()
     {
-      return cb ? static_cast<T *>(it->operator->()) : nullptr;
+      return static_cast<T *>(entity());
     }
 
     T &operator*()
     {
-      return static_cast<T &>(it->operator*());
+      return *operator->();
     }
 
     Entity *entity() const
     {
-      if (cb == nullptr || !it || at_current_end())
+      if (cb == nullptr || rcb == nullptr || at_current_end())
         return nullptr;
-      return it->operator->();
+      return rcb->entity_at(index_);
     }
 
     bool at_end() const { return cb == nullptr; }
 
     bool at_current_end() const
     {
-      if (cb == nullptr || rcb == nullptr || !it)
-        return true;
-      return *it == *(rcb->endEntity());
+      return cb == nullptr || rcb == nullptr || index_ >= end_index_;
     }
 
     void step()
@@ -1255,7 +1261,7 @@ namespace ecs
       if (cb == nullptr)
         return;
       if (!at_current_end())
-        (*it)++;
+        ++index_;
       while (cb != nullptr && at_current_end())
         hop();
     }
@@ -1266,13 +1272,17 @@ namespace ecs
       {
         cb = _cb;
         rcb = dynamic_cast<IRegistryComponentBuffer *>(_cb);
-        it = rcb ? rcb->beginEntity() : IEntityIteratorPtr();
+        index_ = 0;
+        // Snapshot count: deferred CreateEntity appends into this same deque.
+        // Index cursors (and a frozen end) stay valid; deque iterators would not.
+        end_index_ = rcb ? rcb->entity_count() : 0;
       }
       else
       {
         cb = nullptr;
         rcb = nullptr;
-        it = IEntityIteratorPtr();
+        index_ = 0;
+        end_index_ = 0;
       }
     }
 
@@ -1304,7 +1314,8 @@ namespace ecs
 
     IComponentBuffer *cb = nullptr;
     IRegistryComponentBuffer *rcb = nullptr;
-    IEntityIteratorPtr it;
+    uint32_t index_ = 0;
+    uint32_t end_index_ = 0;
   };
 
   template <typename B, typename... Ts>
