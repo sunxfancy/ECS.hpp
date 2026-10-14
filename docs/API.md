@@ -147,7 +147,9 @@ Entity *try_get(EntityHandle h);
 - generation mismatch
 - entity is dead
 
-**v1 note:** handles taken from staging entities are not remapped through publish. After commit, take a new handle from the published entity (or do not rely on the old staging handle).
+Deferred `CreateEntity` reserves a main-storage slot marked staging, so
+`handle_of(staged)` stays valid across `commit` (same id + generation + address).
+Views skip staging-flagged entities until publish clears the flag.
 
 ---
 
@@ -195,7 +197,9 @@ for (auto [pos, vel] : ecs::View<Node, Node::Position, Node::Velocity>(table))
   pos->x += vel->dx;
 ```
 
-`operator*` on the iterator yields `std::tuple<Ts *...>`. Dead and staging entities are skipped.
+`operator*` on the iterator yields `std::tuple<Ts *...>` (components only). Use
+`entity()` for `B*` or `row()` for `std::tuple<B *, Ts *...>`. Dead and staging
+entities are skipped.
 
 ---
 

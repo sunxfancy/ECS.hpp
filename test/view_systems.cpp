@@ -265,6 +265,42 @@ TEST_CASE("many entities View visits all once")
   REQUIRE(sum == static_cast<float>((N - 1) * N / 2));
 }
 
+TEST_CASE("ViewIterator entity and row yield the entity record")
+{
+  ecs::Table table;
+  vs::Node *a = vs::Node::create(table);
+  vs::Node *b = vs::Node::create(table);
+  a->position()->x = 3;
+  b->position()->x = 5;
+
+  int n = 0;
+  float sum = 0;
+  auto view = ecs::View<vs::Node, vs::Node::Position>(table);
+  for (auto it = view.begin(); it != view.end(); ++it)
+  {
+    vs::Node *e = it.entity();
+    REQUIRE(e != nullptr);
+    auto [row_e, p] = it.row();
+    REQUIRE(row_e == e);
+    REQUIRE(p != nullptr);
+    REQUIRE(p->x == e->position()->x);
+    sum += p->x;
+    ++n;
+  }
+  REQUIRE(n == 2);
+  REQUIRE(sum == 8.f);
+
+  {
+    auto kill = ecs::View<vs::Node, vs::Node::Position>(table);
+    for (auto it = kill.begin(); it != kill.end(); ++it)
+    {
+      if (it.entity()->position()->x == 3.f)
+        ecs::DestroyEntity(it.entity());
+    }
+  }
+  REQUIRE(count_nodes(table) == 1);
+}
+
 TEST_CASE("Table destructor clears managers without leak assert")
 {
   {

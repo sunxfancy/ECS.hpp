@@ -931,8 +931,29 @@ namespace ecs
 
   inline void Table::publish_staging()
   {
+    // Deferred creates are reserved directly in main storage with kEntityStaging.
+    // Commit promotes them in place so EntityHandle id/generation stay stable.
+    for (auto &[type, cm] : managers_)
+    {
+      (void)type;
+      if (cm == nullptr || cm->registy == nullptr)
+        continue;
+      auto *reg = dynamic_cast<IRegistryComponentBuffer *>(cm->registy);
+      if (reg == nullptr)
+        continue;
+      for (uint32_t id = 0; id < reg->entity_count(); ++id)
+      {
+        Entity *e = reg->entity_at(id);
+        if (e == nullptr || (e->flags & kEntityDead) != 0)
+          continue;
+        e->flags &= ~kEntityStaging;
+      }
+    }
+
+    // Legacy path: move any records still sitting in staging_managers_.
     for (auto &[type, staging_cm] : staging_managers_)
     {
+      (void)type;
       IComponentManager *main_cm = staging_cm->ensure_main_manager(this);
       main_cm->publish_from(staging_cm);
     }
@@ -962,7 +983,7 @@ namespace ecs
    *        arguments to it.
    *
    * @param table Owning table.
-   * @param force_main When true, bypasses staging and publishes immediately.
+   * @param force_main When true, creates a visible main entity even while deferred.
    * @param args Forwarded to T's constructor; no argument means T().
    * @return The new record, owned by @p table.
    * @remarks T only has to be constructible from @p args and destructible. A
@@ -972,13 +993,13 @@ namespace ecs
   template <typename T, typename... Args>
   T *CreateEntity(Table &table, bool force_main, Args &&...args)
   {
-    const bool use_staging = table.is_deferred() && !force_main;
+    // Deferred creates reserve a slot in main storage and mark it staging so
+    // Views skip it until commit. That keeps EntityHandle identity stable and
+    // avoids a second registry that would require default-constructible holes.
+    const bool mark_staging = table.is_deferred() && !force_main;
 
-    IComponentManager &cm = use_staging
-                                ? static_cast<IComponentManager &>(
-                                      table.template getOrCreateStagingManager<T>())
-                                : static_cast<IComponentManager &>(
-                                      table.template getOrCreateManager<T>());
+    IComponentManager &cm =
+        static_cast<IComponentManager &>(table.template getOrCreateManager<T>());
 
     auto *registry = cm.template getOrCreateRegistryComponentBuffer<T>();
     uint32_t id = registry->emplace(std::forward<Args>(args)...);
@@ -986,7 +1007,7 @@ namespace ecs
     inst.id = id;
     inst.table = &table;
     inst.storage = &cm;
-    if (use_staging)
+    if (mark_staging)
       inst.flags |= kEntityStaging;
     if (inst.generation == 0)
       inst.generation = 1;
@@ -1023,15 +1044,13 @@ namespace ecs
     e->flags |= kEntityDead;
 
     Table *table = e->table;
-    const bool is_staging = (e->flags & kEntityStaging) != 0;
 
     if (table->is_deferred())
     {
-      if (!is_staging)
-      {
-        table->pending_destroys_.push_back(
-            {e->getComponentManager().getType(), e->id, e->generation, false});
-      }
+      // Staging-flagged deferred creates live in main storage, so they use the
+      // same pending reclaim path as ordinary destroys.
+      table->pending_destroys_.push_back(
+          {e->getComponentManager().getType(), e->id, e->generation, false});
     }
     else
     {
@@ -1074,6 +1093,7 @@ namespace ecs
       return nullptr;
     if (e->flags & kEntityDead)
       return nullptr;
+    // Staging-flagged deferred creates are valid handle targets before commit.
 
     return e;
   }
@@ -1103,14 +1123,14 @@ namespace ecs
       if (cb == nullptr)
         return other.cb == nullptr;
       if (cb == other.cb)
-        return it == other.it;
+        return index_ == other.index_;
       return false;
     }
 
     bool operator!=(const BufferIterator &other) const { return !(*this == other); }
 
     /** @brief Slot index this iterator currently addresses. */
-    uint32_t index() const { return static_cast<uint32_t>(it - cb->container.begin()); }
+    uint32_t index() const { return index_; }
 
     /**
      * @brief Whether the current slot holds a value.
@@ -1122,11 +1142,11 @@ namespace ecs
      */
     bool hasValue() const
     {
-      return cb != nullptr && it != cb->container.end() && cb->has(index());
+      return cb != nullptr && !at_current_end() && cb->has(index_);
     }
 
-    T *operator->() { return hasValue() ? cb->ptr(index()) : nullptr; }
-    T &operator*() { return cb->at(index()); }
+    T *operator->() { return hasValue() ? cb->ptr(index_) : nullptr; }
+    T &operator*() { return cb->at(index_); }
 
     CBType *buffer() const { return cb; }
 
@@ -1136,18 +1156,25 @@ namespace ecs
     {
       if (cb == nullptr)
         return;
-      if (it != cb->container.end())
-        ++it;
-      while (cb != nullptr && it == cb->container.end())
+      if (!at_current_end())
+        ++index_;
+      while (cb != nullptr && at_current_end())
         hop();
     }
 
   private:
+    bool at_current_end() const
+    {
+      return cb == nullptr || index_ >= end_index_;
+    }
+
     void setCB(CBType *_cb)
     {
       cb = _cb;
-      if (cb != nullptr)
-        it = cb->container.begin();
+      index_ = 0;
+      // Snapshot size so deferred CreateEntity can grow the deque without
+      // invalidating this cursor or making mid-View creates visible.
+      end_index_ = (cb != nullptr) ? static_cast<uint32_t>(cb->container.size()) : 0;
     }
 
     void hop()
@@ -1174,7 +1201,8 @@ namespace ecs
     }
 
     CBType *cb = nullptr;
-    typename std::deque<SlotStorage<std::remove_const_t<T>>>::iterator it;
+    uint32_t index_ = 0;
+    uint32_t end_index_ = 0;
   };
 
   template <typename T>
@@ -1195,7 +1223,7 @@ namespace ecs
       if (cb == nullptr)
         return other.cb == nullptr;
       if (cb == other.cb)
-        return it == other.it;
+        return index_ == other.index_;
       return false;
     }
 
@@ -1206,28 +1234,26 @@ namespace ecs
 
     T *operator->()
     {
-      return cb ? static_cast<T *>(it->operator->()) : nullptr;
+      return static_cast<T *>(entity());
     }
 
     T &operator*()
     {
-      return static_cast<T &>(it->operator*());
+      return *operator->();
     }
 
     Entity *entity() const
     {
-      if (cb == nullptr || !it || at_current_end())
+      if (cb == nullptr || rcb == nullptr || at_current_end())
         return nullptr;
-      return it->operator->();
+      return rcb->entity_at(index_);
     }
 
     bool at_end() const { return cb == nullptr; }
 
     bool at_current_end() const
     {
-      if (cb == nullptr || rcb == nullptr || !it)
-        return true;
-      return *it == *(rcb->endEntity());
+      return cb == nullptr || rcb == nullptr || index_ >= end_index_;
     }
 
     void step()
@@ -1235,7 +1261,7 @@ namespace ecs
       if (cb == nullptr)
         return;
       if (!at_current_end())
-        (*it)++;
+        ++index_;
       while (cb != nullptr && at_current_end())
         hop();
     }
@@ -1246,13 +1272,17 @@ namespace ecs
       {
         cb = _cb;
         rcb = dynamic_cast<IRegistryComponentBuffer *>(_cb);
-        it = rcb ? rcb->beginEntity() : IEntityIteratorPtr();
+        index_ = 0;
+        // Snapshot count: deferred CreateEntity appends into this same deque.
+        // Index cursors (and a frozen end) stay valid; deque iterators would not.
+        end_index_ = rcb ? rcb->entity_count() : 0;
       }
       else
       {
         cb = nullptr;
         rcb = nullptr;
-        it = IEntityIteratorPtr();
+        index_ = 0;
+        end_index_ = 0;
       }
     }
 
@@ -1284,7 +1314,8 @@ namespace ecs
 
     IComponentBuffer *cb = nullptr;
     IRegistryComponentBuffer *rcb = nullptr;
-    IEntityIteratorPtr it;
+    uint32_t index_ = 0;
+    uint32_t end_index_ = 0;
   };
 
   template <typename B, typename... Ts>
@@ -1317,9 +1348,30 @@ namespace ecs
 
     bool operator!=(const ViewIterator &other) const { return !(*this == other); }
 
+    /**
+     * @brief Borrowed pointer to the current entity record (base type B).
+     * @lifetime Valid until the owning Table mutates this slot (destroy / freelist reuse).
+     * @remarks Prefer this (or row()) over a second live-entity index when a system
+     *          needs identity for DestroyEntity, Links, or handles.
+     */
+    B *entity() const
+    {
+      return static_cast<B *>(RegistryBufferIterator<B>::entity());
+    }
+
+    /**
+     * @brief Component columns only (existing structured-binding shape).
+     * @remarks Use row() when the entity pointer is needed in the same binding.
+     */
     std::tuple<Ts *...> operator*()
     {
       return std::tuple<Ts *...>(BufferIterator<Ts>::operator->()...);
+    }
+
+    /** @brief Entity plus component columns: structured-bind as auto [e, a, b] = it.row(). */
+    std::tuple<B *, Ts *...> row()
+    {
+      return std::tuple<B *, Ts *...>(entity(), BufferIterator<Ts>::operator->()...);
     }
 
   private:
