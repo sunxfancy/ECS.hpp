@@ -48,3 +48,16 @@ target_include_directories(ecs_query_lifetime_test PRIVATE "${CMAKE_CURRENT_SOUR
 foreach(_case scope alignment reuse)
     add_test(NAME ecs_query_lifetime.${_case} COMMAND ecs_query_lifetime_test ${_case})
 endforeach()
+
+# A shared provider and its caller must observe the same thread-local override.
+find_package(Threads REQUIRED)
+add_library(ecs_current_owner SHARED test/shared_current_owner.cpp)
+target_compile_definitions(ecs_current_owner PUBLIC EVENGINE_MODULE_DLL
+    PRIVATE EVENGINE_EXPORTS_FOUNDATION)
+add_library(ecs_current_consumer SHARED test/shared_current_consumer.cpp)
+target_link_libraries(ecs_current_consumer PUBLIC ecs_current_owner)
+add_executable(ecs_shared_current_test test/shared_current_main.cpp)
+target_link_libraries(ecs_shared_current_test PRIVATE ecs_current_consumer Threads::Threads)
+set_target_properties(ecs_current_owner ecs_current_consumer ecs_shared_current_test
+    PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+add_test(NAME ecs_shared_current COMMAND $<TARGET_FILE:ecs_shared_current_test>)
