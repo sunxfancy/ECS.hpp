@@ -175,8 +175,7 @@ namespace ecs
     friend void DestroyEntity(Entity *);
   };
 
-  // EVEngine patch (cmake/patches/ecs-shared-default-table.patch): the default
-  // Table is process-wide state. When the engine is split into per-layer shared
+  // The default Table is process-wide state. When an engine uses shared
   // link groups (EVENGINE_MODULE_DLL) every image would get its own copy of the
   // function-local static below, so the storage lives in the foundation link unit
   // (src/engine/common/EcsDefaultTable.cpp) and each image calls into it. OBJECT /
@@ -194,6 +193,8 @@ namespace ecs
 #    define EVE_ECS_DEFAULT_TABLE_API
 #  endif
   EVE_ECS_DEFAULT_TABLE_API Table &engine_default_table();
+  /** @brief Return the process-owned active-table slot for the calling thread. */
+  EVE_ECS_DEFAULT_TABLE_API Table *&engine_current_slot();
 #endif
 
   inline Table &default_table()
@@ -208,8 +209,12 @@ namespace ecs
 
   inline Table *&current_slot()
   {
+#if defined(EVENGINE_MODULE_DLL)
+    return engine_current_slot();
+#else
     thread_local Table *cur = nullptr;
     return cur;
+#endif
   }
 
   inline Table *current()
