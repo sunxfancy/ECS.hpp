@@ -131,3 +131,22 @@ Treat failing `[target]` cases as a backlog for hardening work, not as regressio
 | Nested defer depth | `defer_commit.cpp` |
 | Inheritance within one table | `table_world.cpp`, `view_systems.cpp` |
 | Staging publish components | `defer_commit.cpp`, `view_systems.cpp` |
+
+## Query/lifetime regressions (C++17, no test-framework dependency)
+
+`test/query_lifetime.cpp` is a separate executable covering branched subtype scope,
+component/registry creation-order permutations, unequal column sizes, const and
+non-default components, entity-only Views, and constructor failures during fresh,
+recycled and deferred creation. Repeated failed reuse must preserve stale-handle
+rejection, resource lifetime and retryability, including Table teardown immediately
+after failure.
+
+```sh
+cmake -S . -B build -DCMAKE_CXX_COMPILER=g++
+cmake --build build --target ecs_query_lifetime_test
+ctest --test-dir build -R ecs_query_lifetime --output-on-failure
+```
+
+This target builds independently of the legacy zeroerr `_Pragma` limitation above.
+For memory checking, compile the runner with `-fsanitize=address,undefined` and run
+all three cases; constructor-failure tests must not report invalid destruction.

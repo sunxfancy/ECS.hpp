@@ -166,16 +166,44 @@ namespace ecs
     std::map<std::type_index, IComponentManager *> staging_managers_;
     int defer_depth_ = 0;
     std::vector<PendingDestroy> pending_destroys_;
+    bool has_pending_main_staging_ = false;
 
     friend void begin_defer(Table &);
     friend void end_defer(Table &);
+    template <typename T, typename... Args>
+    friend T *CreateEntity(Table &, bool, Args &&...);
     friend void DestroyEntity(Entity *);
   };
 
+  // EVEngine patch (cmake/patches/ecs-shared-default-table.patch): the default
+  // Table is process-wide state. When the engine is split into per-layer shared
+  // link groups (EVENGINE_MODULE_DLL) every image would get its own copy of the
+  // function-local static below, so the storage lives in the foundation link unit
+  // (src/engine/common/EcsDefaultTable.cpp) and each image calls into it. OBJECT /
+  // static builds keep the inline definition and are byte-for-byte unchanged.
+#if defined(EVENGINE_MODULE_DLL)
+#  if defined(_WIN32)
+#    if defined(EVENGINE_EXPORTS_FOUNDATION)
+#      define EVE_ECS_DEFAULT_TABLE_API __declspec(dllexport)
+#    else
+#      define EVE_ECS_DEFAULT_TABLE_API __declspec(dllimport)
+#    endif
+#  elif defined(__GNUC__) || defined(__clang__)
+#    define EVE_ECS_DEFAULT_TABLE_API __attribute__((visibility("default")))
+#  else
+#    define EVE_ECS_DEFAULT_TABLE_API
+#  endif
+  EVE_ECS_DEFAULT_TABLE_API Table &engine_default_table();
+#endif
+
   inline Table &default_table()
   {
+#if defined(EVENGINE_MODULE_DLL)
+    return engine_default_table();
+#else
     static Table t;
     return t;
+#endif
   }
 
   inline Table *&current_slot()
@@ -324,6 +352,12 @@ namespace ecs
 
   class IComponentManager
   {
+    template <typename T> friend class RegistryComponentBuffer;
+    template <typename B, typename... Ts> friend class View;
+    friend void DestroyEntity(Entity *);
+    // Invalidation index only; entity flags remain the liveness authority.
+    uint64_t entity_revision_ = 0;
+
   public:
     Table *table = nullptr;
     IComponentManager *parent = nullptr;
@@ -430,8 +464,8 @@ namespace ecs
         // Construct the record in place from the staging value. The staging
         // buffers are destroyed immediately after publish_staging() returns,
         // so moving is both safe and the only requirement placed on B.
-        uint32_t mid = m_reg->emplace(std::move(s_reg->container[sid]));
-        B &me = m_reg->container[mid];
+        uint32_t mid = m_reg->emplace(std::move(*static_cast<B *>(s_reg->entity_at(sid))));
+        B &me = *static_cast<B *>(m_reg->entity_at(mid));
         me.id = mid;
         me.flags &= ~(kEntityStaging | kEntityDead);
         me.storage = this;
@@ -491,6 +525,13 @@ namespace ecs
   template <typename T>
   class CommonComponentBuffer : public IComponentSlotBuffer
   {
+    template <typename B, typename... Ts>
+    friend class View;
+    uint64_t presence_revision_ = 0;
+    uint64_t prepared_presence_revision_ = 0;
+    uint64_t prepared_entity_revision_ = 0;
+    uint32_t prepared_size_ = 0;
+    bool preparation_valid_ = false;
     // The whole point of tracking presence out of band: a component buffer must
     // keep the exact layout it had when it stored T directly. If this ever
     // fires, per-slot overhead has crept back into the arrays a View walks.
@@ -633,6 +674,8 @@ namespace ecs
     }
 
   private:
+    friend class ComponentBuffer<T>;
+
     void ensureWord(uint32_t id)
     {
       const size_t word = (static_cast<size_t>(id) >> 6) + 1;
@@ -641,11 +684,13 @@ namespace ecs
     }
     void mark(uint32_t id)
     {
+      ++presence_revision_;
       ensureWord(id);
       live_[static_cast<size_t>(id) >> 6] |= (1ull << (id & 63u));
     }
     void unmark(uint32_t id)
     {
+      ++presence_revision_;
       const size_t word = static_cast<size_t>(id) >> 6;
       if (word < live_.size())
         live_[word] &= ~(1ull << (id & 63u));
@@ -675,9 +720,25 @@ namespace ecs
     {
       if (new_size > this->container.size())
         this->container.resize(new_size);
-      for (uint32_t id = 0; id < new_size; ++id)
-        if (!this->has(id))
-          this->emplace(id);
+      // A full presence word proves that its values need no construction.
+      // Re-read incomplete words slot by slot: constructors can change later
+      // slots, and retries after a throwing constructor must preserve order.
+      for (uint64_t first = 0; first < new_size; first += 64)
+      {
+        const uint32_t count = static_cast<uint32_t>(
+            std::min<uint64_t>(64, uint64_t(new_size) - first));
+        const uint64_t mask = count == 64 ? ~uint64_t(0)
+                                         : (uint64_t(1) << count) - 1;
+        const size_t word = static_cast<size_t>(first >> 6);
+        if (word < this->live_.size() && (this->live_[word] & mask) == mask)
+          continue;
+        for (uint32_t offset = 0; offset < count; ++offset)
+        {
+          const uint32_t id = static_cast<uint32_t>(first) + offset;
+          if (!this->has(id))
+            this->emplace(id);
+        }
+      }
     }
 
     BufferIterator<T> begin() { return BufferIterator<T>(this); }
@@ -688,30 +749,38 @@ namespace ecs
   class EntityIterator : public IEntityIterator
   {
   public:
-    EntityIterator(typename std::deque<T>::iterator it) : it(it) {}
-    typename std::deque<T>::iterator it;
+    EntityIterator(IRegistryComponentBuffer *registry, uint32_t index)
+        : registry_(registry), index_(index), end_(registry->entity_count())
+    {
+      skip_unconstructed();
+    }
 
     IEntityIterator &operator++(int) override
     {
-      it++;
+      if (index_ < end_)
+        ++index_;
+      skip_unconstructed();
       return *this;
     }
 
     bool operator==(const IEntityIterator &other) override
     {
       auto *o = dynamic_cast<const EntityIterator<T> *>(&other);
-      if (o == nullptr)
-        return false;
-      return it == o->it;
+      return o && registry_ == o->registry_ && index_ == o->index_;
     }
+    bool operator!=(const IEntityIterator &other) override { return !(*this == other); }
+    Entity *operator->() override { return registry_->entity_at(index_); }
+    Entity &operator*() override { return *operator->(); }
 
-    bool operator!=(const IEntityIterator &other) override
+  private:
+    void skip_unconstructed()
     {
-      return !(*this == other);
+      while (index_ < end_ && registry_->entity_at(index_) == nullptr)
+        ++index_;
     }
-
-    Entity *operator->() override { return &*it; }
-    Entity &operator*() override { return *it; }
+    IRegistryComponentBuffer *registry_;
+    uint32_t index_;
+    uint32_t end_;
   };
 
   /**
@@ -729,8 +798,8 @@ namespace ecs
                                   public IRegistryComponentBuffer
   {
   public:
-    std::deque<T> container;
-    std::vector<uint32_t> freelist_;
+    RegistryComponentBuffer(const RegistryComponentBuffer &) = delete;
+    RegistryComponentBuffer &operator=(const RegistryComponentBuffer &) = delete;
 
     RegistryComponentBuffer(IComponentManager *cm, IComponentBuffer *pcb)
     {
@@ -752,78 +821,132 @@ namespace ecs
       }
     }
 
+    ~RegistryComponentBuffer() override
+    {
+      for (uint32_t id = 0; id < size(); ++id)
+        if (constructed(id))
+          std::destroy_at(record(id));
+    }
+
     /**
      * @brief Constructs one entity record in a fresh or recycled slot.
      * @param args Forwarded to T's constructor; no argument means T().
-     * @return The slot id the new record occupies.
-     * @remarks A recycled slot keeps the retired incarnation's generation so
-     *          handles to it stay stale.
+     * @return The slot id the new record occupies; the registry owns the value.
+     * @thread Call on the Table owner thread.
+     * @reentrancy Record constructors/destructors must not structurally reenter
+     *             the same registry.
+     * @throws Propagates allocation or record-construction failures. A failed
+     *         reuse leaves an unconstructed, retryable slot, never a live value.
+     * @remarks A recycled slot preserves the retired incarnation's generation.
+     * @cost Amortized constant storage work plus T construction/destruction.
      */
     template <typename... Args>
     uint32_t emplace(Args &&...args)
     {
+      ++this->manager->entity_revision_;
       if (!freelist_.empty())
       {
-        uint32_t id = freelist_.back();
+        const RetiredSlot retired = freelist_.back();
         freelist_.pop_back();
-        T &slot = container[id];
-        const uint32_t preserved_gen = slot.generation;
-        slot.~T();
-        new (&slot) T(std::forward<Args>(args)...);
-        slot.generation = preserved_gen;
-        return id;
+        if (constructed(retired.id))
+        {
+          set_constructed(retired.id, false);
+          std::destroy_at(record(retired.id));
+        }
+        try
+        {
+          new (static_cast<void *>(container_[retired.id].bytes)) T(std::forward<Args>(args)...);
+        }
+        catch (...)
+        {
+          // pop_back retained capacity; restoring this entry cannot allocate
+          // under the no-structural-reentry record-construction contract.
+          freelist_.push_back(retired);
+          throw;
+        }
+        set_constructed(retired.id, true);
+        record(retired.id)->generation = retired.generation;
+        return retired.id;
       }
-      container.emplace_back(std::forward<Args>(args)...);
-      return static_cast<uint32_t>(container.size() - 1);
+      const uint32_t id = size();
+      // Allocate the lifetime bit before constructing user state.
+      constructed_.resize((static_cast<size_t>(id) >> 6) + 1, 0);
+      container_.emplace_back();
+      try
+      {
+        new (static_cast<void *>(container_[id].bytes)) T(std::forward<Args>(args)...);
+      }
+      catch (...)
+      {
+        container_.pop_back();
+        throw;
+      }
+      set_constructed(id, true);
+      return id;
     }
 
-    uint32_t size() const override { return static_cast<uint32_t>(container.size()); }
-
+    uint32_t size() const override { return static_cast<uint32_t>(container_.size()); }
     const std::type_info &getType() const override { return typeid(T); }
 
-    /** @brief Returns the record at @p id, or nullptr; never creates a slot. */
+    /** @brief Borrows a constructed record, or nullptr; never creates a slot. */
     Entity *getEntity(uint32_t id) override
     {
-      if (id >= container.size())
-        return nullptr;
-      return &container[id];
+      return constructed(id) ? record(id) : nullptr;
     }
 
     IEntityIteratorPtr beginEntity() override
     {
-      return IEntityIteratorPtr(new EntityIterator<T>(this->container.begin()));
+      return IEntityIteratorPtr(new EntityIterator<T>(this, 0));
     }
-
     IEntityIteratorPtr endEntity() override
     {
-      return IEntityIteratorPtr(new EntityIterator<T>(this->container.end()));
+      return IEntityIteratorPtr(new EntityIterator<T>(this, size()));
     }
 
     void reclaim(uint32_t id) override
     {
-      if (id >= this->container.size())
+      if (!constructed(id))
         return;
-
-      freelist_.push_back(id);
-
+      freelist_.push_back({id, record(id)->generation});
       for (auto &[key, buf] : this->manager->components)
       {
         (void)key;
         buf->reset_slot(id);
       }
-
     }
 
-    uint32_t entity_count() const override
-    {
-      return static_cast<uint32_t>(this->container.size());
-    }
+    uint32_t entity_count() const override { return size(); }
+    Entity *entity_at(uint32_t index) override { return getEntity(index); }
 
-    Entity *entity_at(uint32_t index) override
+  private:
+    struct RetiredSlot
     {
-      if (index >= this->container.size())
-        return nullptr;
-      return &this->container[index];
+      uint32_t id;
+      uint32_t generation;
+    };
+    // Raw slots keep entity stride/address stability; the bitmap owns C++
+    // object lifetime, independently of dead/staging gameplay visibility.
+    std::deque<SlotStorage<T>> container_;
+    std::vector<uint64_t> constructed_;
+    std::vector<RetiredSlot> freelist_;
+
+    bool constructed(uint32_t id) const
+    {
+      const size_t word = static_cast<size_t>(id) >> 6;
+      return id < size() && word < constructed_.size() &&
+             (constructed_[word] & (uint64_t(1) << (id & 63u))) != 0;
+    }
+    void set_constructed(uint32_t id, bool value)
+    {
+      const uint64_t bit = uint64_t(1) << (id & 63u);
+      if (value)
+        constructed_[static_cast<size_t>(id) >> 6] |= bit;
+      else
+        constructed_[static_cast<size_t>(id) >> 6] &= ~bit;
+    }
+    T *record(uint32_t id)
+    {
+      return std::launder(reinterpret_cast<T *>(container_[id].bytes));
     }
   };
 
@@ -933,20 +1056,26 @@ namespace ecs
   {
     // Deferred creates are reserved directly in main storage with kEntityStaging.
     // Commit promotes them in place so EntityHandle id/generation stay stable.
-    for (auto &[type, cm] : managers_)
+    // Creation is the only owner of staging admission. An idle View exit
+    // must not scan every entity merely to clear flags that were never set.
+    if (has_pending_main_staging_)
     {
-      (void)type;
-      if (cm == nullptr || cm->registy == nullptr)
-        continue;
-      auto *reg = dynamic_cast<IRegistryComponentBuffer *>(cm->registy);
-      if (reg == nullptr)
-        continue;
-      for (uint32_t id = 0; id < reg->entity_count(); ++id)
+      has_pending_main_staging_ = false;
+      for (auto &[type, cm] : managers_)
       {
-        Entity *e = reg->entity_at(id);
-        if (e == nullptr || (e->flags & kEntityDead) != 0)
+        (void)type;
+        if (cm == nullptr || cm->registy == nullptr)
           continue;
-        e->flags &= ~kEntityStaging;
+        auto *reg = dynamic_cast<IRegistryComponentBuffer *>(cm->registy);
+        if (reg == nullptr)
+          continue;
+        for (uint32_t id = 0; id < reg->entity_count(); ++id)
+        {
+          Entity *e = reg->entity_at(id);
+          if (e == nullptr || (e->flags & kEntityDead) != 0)
+            continue;
+          e->flags &= ~kEntityStaging;
+        }
       }
     }
 
@@ -1003,12 +1132,15 @@ namespace ecs
 
     auto *registry = cm.template getOrCreateRegistryComponentBuffer<T>();
     uint32_t id = registry->emplace(std::forward<Args>(args)...);
-    T &inst = registry->container[id];
+    T &inst = *static_cast<T *>(registry->entity_at(id));
     inst.id = id;
     inst.table = &table;
     inst.storage = &cm;
     if (mark_staging)
+    {
       inst.flags |= kEntityStaging;
+      table.has_pending_main_staging_ = true;
+    }
     if (inst.generation == 0)
       inst.generation = 1;
 
@@ -1040,6 +1172,7 @@ namespace ecs
     if (e->flags & kEntityDead)
       return;
 
+    ++e->getComponentManager().entity_revision_;
     e->generation++;
     e->flags |= kEntityDead;
 
@@ -1107,7 +1240,7 @@ namespace ecs
     using CBType = ComponentBuffer<std::remove_const_t<T>>;
 
     BufferIterator() {}
-    BufferIterator(CBType *_cb)
+    BufferIterator(CBType *_cb) : root_(_cb)
     {
       setCB(_cb);
     }
@@ -1182,24 +1315,20 @@ namespace ecs
       if (cb == nullptr)
         return;
       if (cb->children != nullptr)
-      {
         setCB(dynamic_cast<CBType *>(cb->children));
-      }
-      else if (cb->next != nullptr)
-      {
-        setCB(dynamic_cast<CBType *>(cb->next));
-      }
       else
       {
-        while (cb->parent != nullptr && cb->parent->next == nullptr)
+        while (cb != root_ && cb->next == nullptr)
           cb = dynamic_cast<CBType *>(cb->parent);
-        if (cb != nullptr && cb->parent != nullptr)
-          setCB(dynamic_cast<CBType *>(cb->parent->next));
-        else
+        if (cb == root_)
           cb = nullptr;
+        else
+          setCB(dynamic_cast<CBType *>(cb->next));
       }
     }
 
+    template <typename B, typename... Cs> friend class ViewIterator;
+    CBType *root_ = nullptr;
     CBType *cb = nullptr;
     uint32_t index_ = 0;
     uint32_t end_index_ = 0;
@@ -1210,7 +1339,7 @@ namespace ecs
   {
   public:
     RegistryBufferIterator() {}
-    RegistryBufferIterator(IComponentBuffer *_cb) { setCB(_cb); }
+    RegistryBufferIterator(IComponentBuffer *_cb) : root_(_cb) { setCB(_cb); }
 
     RegistryBufferIterator &operator++()
     {
@@ -1266,7 +1395,19 @@ namespace ecs
         hop();
     }
 
+    /** @brief Borrows a registry and restarts within its inheritance subtree. */
     void setCB(IComponentBuffer *_cb)
+    {
+      root_ = _cb;
+      set_current_buffer(_cb);
+    }
+
+    IComponentBuffer *registry_cb() const { return cb; }
+
+  private:
+    template <typename B, typename... Cs> friend class ViewIterator;
+
+    void set_current_buffer(IComponentBuffer *_cb)
     {
       if (_cb != nullptr)
       {
@@ -1286,32 +1427,24 @@ namespace ecs
       }
     }
 
-    IComponentBuffer *registry_cb() const { return cb; }
-
-  private:
     void hop()
     {
       if (cb == nullptr)
         return;
       if (cb->children != nullptr)
-      {
-        setCB(cb->children);
-      }
-      else if (cb->next != nullptr)
-      {
-        setCB(cb->next);
-      }
+        set_current_buffer(cb->children);
       else
       {
-        while (cb->parent != nullptr && cb->parent->next == nullptr)
-          setCB(cb->parent);
-        if (cb != nullptr && cb->parent != nullptr)
-          setCB(cb->parent->next);
+        while (cb != root_ && cb->next == nullptr)
+          cb = cb->parent;
+        if (cb == root_)
+          set_current_buffer(nullptr);
         else
-          setCB(nullptr);
+          set_current_buffer(cb->next);
       }
     }
 
+    IComponentBuffer *root_ = nullptr;
     IComponentBuffer *cb = nullptr;
     IRegistryComponentBuffer *rcb = nullptr;
     uint32_t index_ = 0;
@@ -1341,9 +1474,14 @@ namespace ecs
 
     bool operator==(const ViewIterator &other) const
     {
-      bool reg = RegistryBufferIterator<B>::operator==(other);
-      bool ts[] = {BufferIterator<Ts>::operator==(other)...};
-      return reg && std::all_of(ts, ts + sizeof...(Ts), [](bool b) { return b; });
+      if constexpr (sizeof...(Ts) == 0)
+        return RegistryBufferIterator<B>::operator==(other);
+      else
+      {
+        bool reg = RegistryBufferIterator<B>::operator==(other);
+        bool ts[] = {BufferIterator<Ts>::operator==(other)...};
+        return reg && std::all_of(ts, ts + sizeof...(Ts), [](bool b) { return b; });
+      }
     }
 
     bool operator!=(const ViewIterator &other) const { return !(*this == other); }
@@ -1389,8 +1527,17 @@ namespace ecs
 
     void step_all()
     {
+      auto *previous = RegistryBufferIterator<B>::registry_cb();
       RegistryBufferIterator<B>::operator++();
-      (BufferIterator<Ts>::operator++(), ...);
+      auto *registry = RegistryBufferIterator<B>::registry_cb();
+      if (registry != previous)
+      {
+        // Bind by concrete Manager once per registry transition. Component
+        // trees may have been created in a different order from registries.
+        (BufferIterator<Ts>::setCB(registry ? registry->manager->template
+            getOrCreateComponentBuffer<std::remove_const_t<Ts>>() : nullptr), ...);
+      }
+      ((BufferIterator<Ts>::index_ = RegistryBufferIterator<B>::index_), ...);
     }
 
     bool current_components_present() const
@@ -1413,12 +1560,30 @@ namespace ecs
   public:
     View() : View(*current()) {}
 
+    /**
+     * @brief Prepares the component columns and defers structural changes.
+     * @ownership Borrows the Table; the Table continues to own all entities.
+     * @lifetime The Table must outlive the View and its borrowed component data.
+     * @thread Call on the Table owner thread; preparation may construct values.
+     * @reentrancy If preparation throws, only this View's defer level is released.
+     *              Successfully constructed slots remain available for retry.
+     * @cost Checks presence words and constructs missing default values per
+     *       component column; existing values are reused on repeated Views.
+     */
     explicit View(Table &table) : table_(&table)
     {
       table_->begin_defer();
-      auto *reg = table.template getOrCreateManager<B>()
-                      .template getOrCreateRegistryComponentBuffer<B>();
-      ensure_space(reg);
+      try
+      {
+        auto *reg = table.template getOrCreateManager<B>()
+                        .template getOrCreateRegistryComponentBuffer<B>();
+        ensure_space(reg);
+      }
+      catch (...)
+      {
+        table_->end_defer();
+        throw;
+      }
     }
 
     ~View() { table_->end_defer(); }
@@ -1446,19 +1611,72 @@ namespace ecs
         cb->engageUpTo(n);
     }
 
+  private:
+    // Keep the public prefix helper's raw-buffer contract. View preparation
+    // additionally respects registry liveness, including pending destruction.
+    template <typename C>
+    static void engageEntitySlots(ComponentBuffer<C> *cb, uint32_t n,
+                                  IRegistryComponentBuffer *registry)
+    {
+      cb->ensure_space(n);
+      if constexpr (std::is_default_constructible_v<C>)
+      {
+        const uint64_t revision = cb->manager->entity_revision_;
+        if (cb->preparation_valid_ && cb->prepared_size_ == n &&
+            cb->prepared_entity_revision_ == revision &&
+            cb->prepared_presence_revision_ == cb->presence_revision_)
+          return;
+        cb->preparation_valid_ = false;
+        bool constructed = false;
+        for (uint64_t first = 0; first < n; first += 64)
+        {
+          const uint32_t count = static_cast<uint32_t>(
+              std::min<uint64_t>(64, uint64_t(n) - first));
+          const uint64_t mask = count == 64 ? ~uint64_t(0)
+                                           : (uint64_t(1) << count) - 1;
+          const size_t word = static_cast<size_t>(first >> 6);
+          if (word < cb->live_.size() && (cb->live_[word] & mask) == mask)
+            continue;
+          for (uint32_t offset = 0; offset < count; ++offset)
+          {
+            const uint32_t id = static_cast<uint32_t>(first) + offset;
+            if (cb->has(id))
+              continue;
+            Entity *entity = registry->entity_at(id);
+            if (entity && !(entity->flags & kEntityDead))
+            {
+              constructed = true;
+              cb->emplace(id);
+            }
+          }
+        }
+        // A construction callback may reset an earlier slot or mutate the
+        // registry. Cache only a complete pass that invoked no user code.
+        if (!constructed && revision == cb->manager->entity_revision_)
+        {
+          cb->prepared_size_ = n;
+          cb->prepared_entity_revision_ = revision;
+          cb->prepared_presence_revision_ = cb->presence_revision_;
+          cb->preparation_valid_ = true;
+        }
+      }
+    }
+
+  public:
     void ensure_space(IComponentBuffer *cur)
     {
       IComponentManager *cm = cur->manager;
+      [[maybe_unused]]
       const uint32_t n = cur->size();
+      [[maybe_unused]]
+      auto *registry = dynamic_cast<IRegistryComponentBuffer *>(cur);
       (void)std::initializer_list<int>{
-          (engageSlots<std::remove_const_t<Ts>>(
-               cm->template getOrCreateComponentBuffer<std::remove_const_t<Ts>>(), n),
+          (engageEntitySlots<std::remove_const_t<Ts>>(
+               cm->template getOrCreateComponentBuffer<std::remove_const_t<Ts>>(), n, registry),
            0)...};
 
-      if (cur->children != nullptr)
-        ensure_space(cur->children);
-      if (cur->next != nullptr)
-        ensure_space(cur->next);
+      for (auto *child = cur->children; child != nullptr; child = child->next)
+        ensure_space(child);
     }
 
     ViewIterator<B, Ts...> begin()
@@ -1470,3 +1688,21 @@ namespace ecs
   };
 
 } // namespace ecs
+
+// Opt-in compiled container ownership; standalone users remain header-only.
+#if defined(EVE_ECS_EXTERN_CONTAINERS)
+#if defined(_WIN32) && defined(EVENGINE_MODULE_DLL) && !defined(EVENGINE_EXPORTS_FOUNDATION)
+extern template class __declspec(dllimport) std::map<std::type_index, ecs::IComponentManager*>;
+extern template class __declspec(dllimport) std::map<std::type_index, ecs::IComponentSlotBuffer*>;
+#else
+extern template class std::map<std::type_index, ecs::IComponentManager*>;
+extern template class std::map<std::type_index, ecs::IComponentSlotBuffer*>;
+#endif
+
+// Handle values keep their original Table/type/id/generation projection and
+// borrowed lifetimes. Only Windows DLL non-template container code is shared.
+#if defined(_WIN32) && defined(EVENGINE_MODULE_DLL) && !defined(EVENGINE_EXPORTS_FOUNDATION)
+extern template class __declspec(dllimport) std::vector<ecs::EntityHandle>;
+#endif
+
+#endif
