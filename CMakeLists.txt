@@ -41,3 +41,10 @@ enable_testing()
 # generators (Visual Studio) so `ctest -C Debug` finds the binary.
 add_test(NAME ecs_test COMMAND $<TARGET_FILE:ecs_test>)
 
+
+# Independent C++17 regression runner; does not depend on zeroerr macro support.
+add_executable(ecs_query_lifetime_test test/query_lifetime.cpp)
+target_include_directories(ecs_query_lifetime_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+foreach(_case scope alignment reuse)
+    add_test(NAME ecs_query_lifetime.${_case} COMMAND ecs_query_lifetime_test ${_case})
+endforeach()

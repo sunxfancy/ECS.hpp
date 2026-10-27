@@ -243,3 +243,45 @@ Table
 ```
 
 `CreateEntity` / `View` / `DestroyEntity` always operate on a concrete `Table` (explicit or current).
+
+## Query alignment and failed record construction
+
+A `View<B, ...>` visits B and its descendants only. It neither visits nor prepares
+components for B's siblings. Parent component-buffer links may still be created
+to maintain inheritance metadata. Entity-only Views obey the same subtree boundary.
+Entity and component columns use one concrete-registry slot cursor; each component
+buffer is bound from that registry's Manager once per type transition. Component
+initialization order does not define query order or row identity. Standalone
+component-buffer iteration is also bounded by its starting subtree.
+
+Registry storage owns raw slots and a separate constructed-object bitmap. This
+bitmap describes C++ object lifetime; entity dead/staging flags still describe
+visibility. A destroyed record may remain constructed until reuse or Table teardown.
+If replacement construction throws, the old record has already been destroyed:
+this is a basic exception guarantee, not restoration of the old entity. The empty
+slot is excluded by `getEntity`, `entity_at`, raw entity iterators and Views. Its
+retired generation remains with the reusable slot, so failed attempts and a later
+successful retry cannot revive an old Handle. Table destruction skips empty slots.
+Fresh-construction failure does not publish a record.
+
+Call construction, destruction and queries on the owning Table thread. Entity
+record constructors/destructors must not structurally reenter the same registry.
+Component construction during View preparation retains its existing callback and
+exception-retry behavior. No locks are taken around user constructors. Borrowed
+record/component addresses remain tied to their owning slot; use Handles across
+structural mutations and frames.
+
+Registry containers are private lifetime-managed storage. Consumers should use
+`IRegistryComponentBuffer` access/iteration rather than directly indexing a deque
+of entity objects. Raw slot stride remains `sizeof(T)`; the lifetime bitmap adds
+one bit per reserved slot, and freelist entries retain an id and generation.
+These internal layout changes require all header consumers to rebuild together.
+
+## Compiled container ownership
+
+Standalone users remain header-only. Engine consumers may define
+`EVE_ECS_EXTERN_CONTAINERS` to import common map instantiations from a compiled
+owner. All consumers and that owner must use the same setting; the owner explicitly
+instantiates the declared map types. Windows shared consumers additionally import
+the EntityHandle vector when `EVENGINE_MODULE_DLL` is set. This changes code
+ownership only; Table, handle lifetime and iteration contracts are unchanged.
